@@ -1,0 +1,150 @@
+package de.arcan.arcshell.ssh.connection
+
+import de.arcan.arcshell.ssh.SshMsgType
+import de.arcan.arcshell.ssh.transport.SshBufferReader
+import de.arcan.arcshell.ssh.transport.SshBufferWriter
+import de.arcan.arcshell.ssh.transport.SshTransport
+
+/**
+ * SSH session channel (RFC 4254 §6). Supports shell, exec, subsystem requests
+ * plus PTY allocation and environment variables.
+ */
+class SessionChannel(
+    localId: Int,
+    transport: SshTransport
+) : Channel(localId, transport) {
+
+    var exitStatus: Int? = null
+        private set
+    var exitSignal: String? = null
+        private set
+
+    /**
+     * Request a pseudo-terminal (PTY) on this session.
+     * Must be called before requestShell/requestExec.
+     */
+    fun requestPty(
+        term: String = "xterm-256color",
+        columns: Int = 80,
+        rows: Int = 24,
+        pixelWidth: Int = 0,
+        pixelHeight: Int = 0
+    ): Boolean {
+        val payload = SshBufferWriter()
+            .writeByte(SshMsgType.CHANNEL_REQUEST)
+            .writeUint32(remoteId)
+            .writeUtf8("pty-req")
+            .writeBoolean(true) // want reply
+            .writeUtf8(term)
+            .writeUint32(columns)
+            .writeUint32(rows)
+            .writeUint32(pixelWidth)
+            .writeUint32(pixelHeight)
+            .writeString(encodeTerminalModes())
+            .toByteArray()
+        transport.sendPacket(payload)
+        return waitRequestReply()
+    }
+
+    /** Change the terminal window size (SIGWINCH). */
+    fun windowChange(columns: Int, rows: Int, pixelWidth: Int = 0, pixelHeight: Int = 0) {
+        val payload = SshBufferWriter()
+            .writeByte(SshMsgType.CHANNEL_REQUEST)
+            .writeUint32(remoteId)
+            .writeUtf8("window-change")
+            .writeBoolean(false) // no reply
+            .writeUint32(columns)
+            .writeUint32(rows)
+            .writeUint32(pixelWidth)
+            .writeUint32(pixelHeight)
+            .toByteArray()
+        transport.sendPacket(payload)
+    }
+
+    /** Set an environment variable on the remote session. */
+    fun setEnv(name: String, value: String): Boolean {
+        val payload = SshBufferWriter()
+            .writeByte(SshMsgType.CHANNEL_REQUEST)
+            .writeUint32(remoteId)
+            .writeUtf8("env")
+            .writeBoolean(true)
+            .writeUtf8(name)
+            .writeUtf8(value)
+            .toByteArray()
+        transport.sendPacket(payload)
+        return waitRequestReply()
+    }
+
+    /** Request a login shell. */
+    fun requestShell(): Boolean {
+        val payload = SshBufferWriter()
+            .writeByte(SshMsgType.CHANNEL_REQUEST)
+            .writeUint32(remoteId)
+            .writeUtf8("shell")
+            .writeBoolean(true)
+            .toByteArray()
+        transport.sendPacket(payload)
+        return waitRequestReply()
+    }
+
+    /** Execute a single command. */
+    fun requestExec(command: String): Boolean {
+        val payload = SshBufferWriter()
+            .writeByte(SshMsgType.CHANNEL_REQUEST)
+            .writeUint32(remoteId)
+            .writeUtf8("exec")
+            .writeBoolean(true)
+            .writeUtf8(command)
+            .toByteArray()
+        transport.sendPacket(payload)
+        return waitRequestReply()
+    }
+
+    /** Start a subsystem (e.g., "sftp"). */
+    fun requestSubsystem(subsystem: String): Boolean {
+        val payload = SshBufferWriter()
+            .writeByte(SshMsgType.CHANNEL_REQUEST)
+            .writeUint32(remoteId)
+            .writeUtf8("subsystem")
+            .writeBoolean(true)
+            .writeUtf8(subsystem)
+            .toByteArray()
+        transport.sendPacket(payload)
+        return waitRequestReply()
+    }
+
+    /** Send a signal to the remote process. */
+    fun sendSignal(signal: String) {
+        val payload = SshBufferWriter()
+            .writeByte(SshMsgType.CHANNEL_REQUEST)
+            .writeUint32(remoteId)
+            .writeUtf8("signal")
+            .writeBoolean(false)
+            .writeUtf8(signal)
+            .toByteArray()
+        transport.sendPacket(payload)
+    }
+
+    override fun onRequest(requestType: String, wantReply: Boolean, reader: SshBufferReader) {
+        when (requestType) {
+            "exit-status" -> {
+                exitStatus = reader.readUint32().toInt()
+            }
+            "exit-signal" -> {
+                exitSignal = reader.readUtf8()
+            }
+        }
+        if (wantReply) {
+            val payload = SshBufferWriter()
+                .writeByte(SshMsgType.CHANNEL_SUCCESS)
+                .writeUint32(remoteId)
+                .toByteArray()
+            transport.sendPacket(payload)
+        }
+    }
+
+    /** Encode terminal modes (RFC 4254 §8). Minimal: just send TTY_OP_END. */
+    private fun encodeTerminalModes(): ByteArray {
+        return byteArrayOf(0) // TTY_OP_END
+    }
+}
