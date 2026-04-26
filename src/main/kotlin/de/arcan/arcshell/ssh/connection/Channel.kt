@@ -121,6 +121,7 @@ open class Channel(
 
     /** Send EOF on this channel. */
     fun sendEof() {
+        if (!isOpen || isEof) return
         val payload = SshBufferWriter()
             .writeByte(SshMsgType.CHANNEL_EOF)
             .writeUint32(remoteId)
