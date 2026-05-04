@@ -5,10 +5,10 @@ import de.arcan.arcshell.ssh.transport.SshBufferWriter
 import de.arcan.arcshell.ssh.transport.SshProtocolException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.bouncycastle.crypto.engines.ChaChaEngine
-import org.bouncycastle.crypto.macs.Poly1305
-import org.bouncycastle.crypto.params.KeyParameter
-import org.bouncycastle.crypto.params.ParametersWithIV
+import de.arcan.arcshell.crypto.bc.crypto.engines.ChaChaEngine
+import de.arcan.arcshell.crypto.bc.crypto.macs.Poly1305
+import de.arcan.arcshell.crypto.bc.crypto.params.KeyParameter
+import de.arcan.arcshell.crypto.bc.crypto.params.ParametersWithIV
 import java.nio.ByteBuffer
 import java.security.SecureRandom
 import javax.crypto.Cipher

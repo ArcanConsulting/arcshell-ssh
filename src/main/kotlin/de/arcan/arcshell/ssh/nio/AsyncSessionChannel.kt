@@ -115,6 +115,23 @@ class AsyncSessionChannel(
         return waitRequestReply()
     }
 
+    /**
+     * Request SSH agent forwarding on this session.
+     * Must be called before requestShell/requestExec.
+     * The server will open "auth-agent@openssh.com" channels back to us
+     * when it needs key operations.
+     */
+    suspend fun requestAgentForwarding(): Boolean {
+        val payload = SshBufferWriter()
+            .writeByte(SshMsgType.CHANNEL_REQUEST)
+            .writeUint32(remoteId)
+            .writeUtf8("auth-agent-req@openssh.com")
+            .writeBoolean(true) // want reply
+            .toByteArray()
+        transport.sendPacket(payload)
+        return waitRequestReply()
+    }
+
     /** Send a signal to the remote process. */
     suspend fun sendSignal(signal: String) {
         val payload = SshBufferWriter()

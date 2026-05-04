@@ -130,7 +130,8 @@ class AsyncSshTransport(
         if (strictKex) packetIO.resetRecvSequence()
 
         // Step 10: Activate encryption (AFTER sequence reset, matching OpenSSH ordering)
-        activateEncryption(alg, kexAlgo.hashAlgorithm, sharedSecret, exchangeHash)
+        val encodedK = kexAlgo.encodedSharedSecret(sharedSecret)
+        activateEncryption(alg, kexAlgo.hashAlgorithm, sharedSecret, exchangeHash, encodedK)
     }
 
     /** Send a packet through the (possibly encrypted) transport. */
@@ -321,8 +322,8 @@ class AsyncSshTransport(
         keyReader.readUtf8() // skip key type
         val pubKeyBytes = keyReader.readString()
 
-        val pubKey = org.bouncycastle.crypto.params.Ed25519PublicKeyParameters(pubKeyBytes, 0)
-        val verifier = org.bouncycastle.crypto.signers.Ed25519Signer()
+        val pubKey = de.arcan.arcshell.crypto.bc.crypto.params.Ed25519PublicKeyParameters(pubKeyBytes, 0)
+        val verifier = de.arcan.arcshell.crypto.bc.crypto.signers.Ed25519Signer()
         verifier.init(false, pubKey)
         verifier.update(hash, 0, hash.size)
         return verifier.verifySignature(sigData)
@@ -410,7 +411,8 @@ class AsyncSshTransport(
         alg: NegotiatedAlgorithms,
         hashAlgorithm: String,
         sharedSecret: BigInteger,
-        exchangeHash: ByteArray
+        exchangeHash: ByteArray,
+        encodedK: ByteArray? = null
     ) {
         val cipherC2S = CipherRegistry.byName(alg.cipherC2S)
             ?: throw SshProtocolException("Unknown cipher: ${alg.cipherC2S}")
@@ -423,8 +425,8 @@ class AsyncSshTransport(
         // ChaCha20-Poly1305 uses 64-byte keys (K1=first 32, K2=last 32), no IV, no MAC
         if (isChaChaC2S && isChaChaS2C) {
             // Derive 64-byte keys for each direction
-            val keyC2S = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'C', sessionId, 64)
-            val keyS2C = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'D', sessionId, 64)
+            val keyC2S = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'C', sessionId, 64, encodedK)
+            val keyS2C = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'D', sessionId, 64, encodedK)
 
             // Dummy cipher (ChaCha20 is handled directly via BouncyCastle, not JCA)
             val dummyCipher = javax.crypto.Cipher.getInstance("AES/CTR/NoPadding")
@@ -447,10 +449,10 @@ class AsyncSshTransport(
         }
 
         // Standard key derivation for non-ChaCha ciphers
-        val ivC2S = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'A', sessionId, cipherC2S.ivSize)
-        val ivS2C = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'B', sessionId, cipherS2C.ivSize)
-        val keyC2S = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'C', sessionId, cipherC2S.keySize)
-        val keyS2C = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'D', sessionId, cipherS2C.keySize)
+        val ivC2S = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'A', sessionId, cipherC2S.ivSize, encodedK)
+        val ivS2C = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'B', sessionId, cipherS2C.ivSize, encodedK)
+        val keyC2S = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'C', sessionId, cipherC2S.keySize, encodedK)
+        val keyS2C = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'D', sessionId, cipherS2C.keySize, encodedK)
 
         // Create ciphers
         val sendCipher = KeyDerivation.createCipher(cipherC2S, keyC2S, ivC2S, encrypt = true)
@@ -462,7 +464,7 @@ class AsyncSshTransport(
         if (!cipherC2S.isAead && alg.macC2S != "none") {
             val macAlgo = MacRegistry.byName(alg.macC2S)
                 ?: throw SshProtocolException("Unknown MAC: ${alg.macC2S}")
-            val macKey = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'E', sessionId, macAlgo.keySize)
+            val macKey = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'E', sessionId, macAlgo.keySize, encodedK)
             sendMac = KeyDerivation.createMac(macAlgo, macKey)
             sendMacLen = macAlgo.macLength
         } else {
@@ -475,7 +477,7 @@ class AsyncSshTransport(
         if (!cipherS2C.isAead && alg.macS2C != "none") {
             val macAlgo = MacRegistry.byName(alg.macS2C)
                 ?: throw SshProtocolException("Unknown MAC: ${alg.macS2C}")
-            val macKey = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'F', sessionId, macAlgo.keySize)
+            val macKey = KeyDerivation.deriveKey(hashAlgorithm, sharedSecret, exchangeHash, 'F', sessionId, macAlgo.keySize, encodedK)
             recvMac = KeyDerivation.createMac(macAlgo, macKey)
             recvMacLen = macAlgo.macLength
         } else {

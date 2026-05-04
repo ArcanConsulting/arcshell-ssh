@@ -59,15 +59,27 @@ class AsyncSshAuthenticator(private val transport: AsyncSshTransport) {
      * @param keyType e.g. "ssh-ed25519", "rsa-sha2-256"
      * @param publicKeyBlob the public key in SSH wire format
      * @param signer callback that signs the auth data with the private key
+     * @param certificateBlob optional SSH certificate blob; when present, the
+     *        cert blob is sent instead of the raw public key and the cert type
+     *        is used as the algorithm name
      */
     suspend fun authPublicKey(
         username: String,
         keyType: String,
         publicKeyBlob: ByteArray,
-        signer: (ByteArray) -> ByteArray
+        signer: (ByteArray) -> ByteArray,
+        certificateBlob: ByteArray? = null
     ): AuthResult {
-        // RFC 8332: use rsa-sha2-256 algorithm name for RSA keys (ssh-rsa SHA-1 disabled in OpenSSH 8.8+)
-        val sigAlgorithm = if (keyType == "ssh-rsa") "rsa-sha2-256" else keyType
+        // When a certificate is provided, advertise the cert key type and send the cert blob.
+        // Signing still uses the same private key (the signer is unchanged).
+        val hasCert = certificateBlob != null
+        val authBlob = certificateBlob ?: publicKeyBlob
+        val sigAlgorithm = if (hasCert) {
+            certTypeForKeyType(keyType)
+        } else {
+            // RFC 8332: use rsa-sha2-256 algorithm name for RSA keys (ssh-rsa SHA-1 disabled in OpenSSH 8.8+)
+            if (keyType == "ssh-rsa") "rsa-sha2-256" else keyType
+        }
 
         // Step 1: Query if key is acceptable (without signature)
         val queryPayload = SshBufferWriter()
@@ -77,7 +89,7 @@ class AsyncSshAuthenticator(private val transport: AsyncSshTransport) {
             .writeUtf8("publickey")
             .writeBoolean(false) // no signature yet
             .writeUtf8(sigAlgorithm)
-            .writeString(publicKeyBlob)
+            .writeString(authBlob)
             .toByteArray()
         transport.sendPacket(queryPayload)
 
@@ -95,7 +107,7 @@ class AsyncSshAuthenticator(private val transport: AsyncSshTransport) {
             .writeUtf8("publickey")
             .writeBoolean(true)
             .writeUtf8(sigAlgorithm)
-            .writeString(publicKeyBlob)
+            .writeString(authBlob)
             .toByteArray()
 
         val signature = signer(signData)
@@ -108,11 +120,24 @@ class AsyncSshAuthenticator(private val transport: AsyncSshTransport) {
             .writeUtf8("publickey")
             .writeBoolean(true)
             .writeUtf8(sigAlgorithm)
-            .writeString(publicKeyBlob)
+            .writeString(authBlob)
             .writeString(signature)
             .toByteArray()
         transport.sendPacket(authPayload)
         return readAuthResponse()
+    }
+
+    /**
+     * Map a base key type to its OpenSSH certificate type.
+     */
+    private fun certTypeForKeyType(keyType: String): String = when (keyType) {
+        "ssh-ed25519" -> "ssh-ed25519-cert-v01@openssh.com"
+        "ssh-rsa", "rsa-sha2-256" -> "rsa-sha2-256-cert-v01@openssh.com"
+        "rsa-sha2-512" -> "rsa-sha2-512-cert-v01@openssh.com"
+        "ecdsa-sha2-nistp256" -> "ecdsa-sha2-nistp256-cert-v01@openssh.com"
+        "ecdsa-sha2-nistp384" -> "ecdsa-sha2-nistp384-cert-v01@openssh.com"
+        "ecdsa-sha2-nistp521" -> "ecdsa-sha2-nistp521-cert-v01@openssh.com"
+        else -> "$keyType-cert-v01@openssh.com"
     }
 
     /**

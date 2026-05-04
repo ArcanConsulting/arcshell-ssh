@@ -43,7 +43,7 @@ open class AsyncChannel(
     var windowSignal = CompletableDeferred<Unit>()
 
     /** Called by AsyncSshConnection when CHANNEL_DATA arrives. */
-    fun onData(data: ByteArray) {
+    open fun onData(data: ByteArray) {
         dataChannel.trySend(data)
     }
 

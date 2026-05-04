@@ -1,5 +1,6 @@
 package de.arcan.arcshell.ssh.nio
 
+import de.arcan.arcshell.ssh.SshChannelOpenFailure
 import de.arcan.arcshell.ssh.SshMsgType
 import de.arcan.arcshell.ssh.SshService
 import de.arcan.arcshell.ssh.transport.SshBufferReader
@@ -29,6 +30,14 @@ class AsyncSshConnection(private val transport: AsyncSshTransport) {
 
     private val channels = ConcurrentHashMap<Int, AsyncChannel>()
     private val nextLocalId = AtomicInteger(0)
+
+    /**
+     * Agent message handler for SSH agent forwarding. When set, inbound
+     * "auth-agent@openssh.com" CHANNEL_OPEN requests from the server are
+     * accepted and routed to this handler. When null, such requests are
+     * rejected with SSH_OPEN_ADMINISTRATIVELY_PROHIBITED.
+     */
+    var agentHandler: AgentMessageHandler? = null
 
     /** Pending channel open responses, keyed by local channel ID. */
     private val channelOpenResponses = ConcurrentHashMap<Int, CompletableDeferred<ByteArray>>()
@@ -257,6 +266,10 @@ class AsyncSshConnection(private val transport: AsyncSshTransport) {
                 val channelId = reader.readUint32().toInt()
                 channels[channelId]?.onRequestFailure()
             }
+            SshMsgType.CHANNEL_OPEN -> {
+                // Server-initiated channel open (e.g. agent forwarding)
+                handleInboundChannelOpen(reader)
+            }
             SshMsgType.CHANNEL_OPEN_CONFIRMATION -> {
                 // Find the waiting coroutine by recipient channel ID (our local ID)
                 val recipientId = SshBufferReader(payload, 1).readUint32().toInt()
@@ -285,6 +298,55 @@ class AsyncSshConnection(private val transport: AsyncSshTransport) {
             }
         }
         return true
+    }
+
+    /**
+     * Handle a server-initiated CHANNEL_OPEN. Currently supports
+     * "auth-agent@openssh.com" for SSH agent forwarding.
+     *
+     * The reader is positioned after the message type byte (offset 1),
+     * so we read the channel type, sender channel, window size, and
+     * max packet size in order per RFC 4254 SS5.1.
+     */
+    private fun handleInboundChannelOpen(reader: SshBufferReader) {
+        val channelType = reader.readUtf8()
+        val senderChannel = reader.readUint32().toInt()
+        val initialWindowSize = reader.readUint32()
+        val maxPacketSize = reader.readUint32().toInt()
+
+        val handler = agentHandler
+        if (channelType == "auth-agent@openssh.com" && handler != null) {
+            val localId = nextLocalId.getAndIncrement()
+            val channel = AsyncAgentChannel(localId, transport, handler)
+            channel.remoteId = senderChannel
+            channel.remoteWindowSize.set(initialWindowSize)
+            channel.remoteMaxPacketSize = maxPacketSize
+            channel.localWindowSize.set(DEFAULT_WINDOW_SIZE.toLong())
+            channel.isOpen = true
+            channels[localId] = channel
+
+            // Send CHANNEL_OPEN_CONFIRMATION
+            transport.sendPacketBlocking(
+                SshBufferWriter()
+                    .writeByte(SshMsgType.CHANNEL_OPEN_CONFIRMATION)
+                    .writeUint32(senderChannel)       // recipient channel (server's ID)
+                    .writeUint32(localId)              // sender channel (our local ID)
+                    .writeUint32(DEFAULT_WINDOW_SIZE)  // initial window size
+                    .writeUint32(DEFAULT_MAX_PACKET_SIZE) // max packet size
+                    .toByteArray()
+            )
+        } else {
+            // Reject unsupported or disabled channel types
+            transport.sendPacketBlocking(
+                SshBufferWriter()
+                    .writeByte(SshMsgType.CHANNEL_OPEN_FAILURE)
+                    .writeUint32(senderChannel)
+                    .writeUint32(SshChannelOpenFailure.ADMINISTRATIVELY_PROHIBITED)
+                    .writeUtf8("Channel type not supported")
+                    .writeUtf8("") // language tag
+                    .toByteArray()
+            )
+        }
     }
 
     fun getChannel(localId: Int): AsyncChannel? = channels[localId]

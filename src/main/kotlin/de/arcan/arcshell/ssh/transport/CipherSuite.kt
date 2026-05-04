@@ -79,14 +79,20 @@ object CompressionRegistry {
     fun nameList(): List<String> = listOf("none")
 }
 
-/** Supported host key types, ordered by preference. */
+/** Supported host key types, ordered by preference. Cert types listed before their base types. */
 object HostKeyRegistry {
     fun nameList(): List<String> = listOf(
+        "ssh-ed25519-cert-v01@openssh.com",
         "ssh-ed25519",
+        "ecdsa-sha2-nistp256-cert-v01@openssh.com",
         "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384-cert-v01@openssh.com",
         "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521-cert-v01@openssh.com",
         "ecdsa-sha2-nistp521",
+        "rsa-sha2-512-cert-v01@openssh.com",
         "rsa-sha2-512",
+        "rsa-sha2-256-cert-v01@openssh.com",
         "rsa-sha2-256",
         "ssh-rsa"
     )
@@ -112,12 +118,12 @@ object KeyDerivation {
         exchangeHash: ByteArray,
         keyId: Char,
         sessionId: ByteArray,
-        neededLength: Int
+        neededLength: Int,
+        encodedK: ByteArray? = null
     ): ByteArray {
         val digest = MessageDigest.getInstance(hashAlgorithm)
 
-        // K is encoded as mpint
-        val kBytes = SshBufferWriter(64).writeMpint(sharedSecret).toByteArray()
+        val kBytes = encodedK ?: SshBufferWriter(64).writeMpint(sharedSecret).toByteArray()
 
         // First round: HASH(K || H || X || session_id)
         digest.update(kBytes)

@@ -66,6 +66,9 @@ class AsyncSshClient(
     /** The SSH transport layer (for advanced use). */
     val transportLayer: AsyncSshTransport? get() = transport
 
+    /** The SSH connection layer (for agent forwarding setup). */
+    val connectionLayer: AsyncSshConnection? get() = connection
+
     /**
      * Connect to the SSH server via a new NIO socket channel and perform
      * the transport-layer handshake (version exchange, KEXINIT, key
@@ -136,13 +139,15 @@ class AsyncSshClient(
      * @param keyType e.g. "ssh-ed25519"
      * @param publicKeyBlob SSH wire-format public key
      * @param signer signs the auth data with the corresponding private key
+     * @param certificateBlob optional SSH certificate blob for cert-based auth
      */
     suspend fun authPublicKey(
         keyType: String,
         publicKeyBlob: ByteArray,
-        signer: (ByteArray) -> ByteArray
+        signer: (ByteArray) -> ByteArray,
+        certificateBlob: ByteArray? = null
     ): AuthResult {
-        return authenticator?.authPublicKey(config.username, keyType, publicKeyBlob, signer)
+        return authenticator?.authPublicKey(config.username, keyType, publicKeyBlob, signer, certificateBlob)
             ?: throw IllegalStateException("Not connected")
     }
 

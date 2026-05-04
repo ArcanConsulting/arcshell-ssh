@@ -1,12 +1,11 @@
 package de.arcan.arcshell.ssh.transport
 
 import de.arcan.arcshell.ssh.SshMsgType
-import org.bouncycastle.crypto.agreement.X25519Agreement
-import org.bouncycastle.crypto.generators.X25519KeyPairGenerator
-import org.bouncycastle.crypto.params.X25519KeyGenerationParameters
-import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
-import org.bouncycastle.crypto.params.X25519PublicKeyParameters
-import org.bouncycastle.jcajce.provider.asymmetric.ec.KeyPairGeneratorSpi
+import de.arcan.arcshell.crypto.bc.crypto.agreement.X25519Agreement
+import de.arcan.arcshell.crypto.bc.crypto.generators.X25519KeyPairGenerator
+import de.arcan.arcshell.crypto.bc.crypto.params.X25519KeyGenerationParameters
+import de.arcan.arcshell.crypto.bc.crypto.params.X25519PrivateKeyParameters
+import de.arcan.arcshell.crypto.bc.crypto.params.X25519PublicKeyParameters
 import java.math.BigInteger
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
@@ -40,6 +39,13 @@ interface KeyExchangeAlgorithm {
     fun computeSharedSecret(serverPublicKey: ByteArray): BigInteger
 
     /**
+     * K encoded for exchange hash and key derivation. Default: mpint encoding.
+     * Post-quantum hybrids override with string encoding per OpenSSH convention.
+     */
+    fun encodedSharedSecret(k: BigInteger): ByteArray =
+        SshBufferWriter(64).writeMpint(k).toByteArray()
+
+    /**
      * Compute the exchange hash H.
      * @param clientVersion client version string (without CR/LF)
      * @param serverVersion server version string
@@ -69,9 +75,12 @@ interface KeyExchangeAlgorithm {
             .writeString(hostKeyBlob)
             .writeString(clientPublicKey)
             .writeString(serverPublicKey)
-            .writeMpint(sharedSecret)
+        val hashInput = buf.toByteArray()
+        val kBytes = encodedSharedSecret(sharedSecret)
         val digest = MessageDigest.getInstance(hashAlgorithm)
-        return digest.digest(buf.toByteArray())
+        digest.update(hashInput)
+        digest.update(kBytes)
+        return digest.digest()
     }
 }
 
@@ -391,7 +400,9 @@ object KeyExchangeRegistry {
     val LEGACY_ALGORITHMS = setOf("diffie-hellman-group14-sha1")
 
     fun getPreferred(): List<KeyExchangeAlgorithm> = listOf(
-        MlKem768X25519Sha512(),     // Post-Quantum hybrid (highest priority)
+        Sntrup761X25519Sha512Standard(), // Post-Quantum hybrid (RFC name)
+        Sntrup761X25519Sha512(),        // Post-Quantum hybrid (@openssh.com legacy)
+        MlKem768X25519Sha512(),         // Post-Quantum hybrid (NIST standardized)
         Curve25519Sha256(),
         Curve25519Sha256LibSsh(),
         EcdhSha2("nistp256", "SHA-256"),
