@@ -1,20 +1,20 @@
 package de.arcan.arcshell.ssh.transport
 
 import de.arcan.arcshell.ssh.SshMsgType
+import de.arcan.arcshell.ssh.nio.AsyncPacketIO
+import de.arcan.arcshell.ssh.nio.AsyncSshTransport
+import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
-import java.io.PipedInputStream
-import java.io.PipedOutputStream
 import java.math.BigInteger
 import java.security.KeyPairGenerator
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 
 /**
- * Tests for [SshTransport] covering:
+ * Tests for [AsyncSshTransport] covering:
  * - exchangeVersions: sends our version, reads server version
  * - readVersionLine: handles banner lines before SSH-2.0
  * - readVersionLine: rejects non-SSH-2.0 versions
@@ -29,78 +29,48 @@ import java.security.spec.ECGenParameterSpec
  */
 class SshTransportTest {
 
-    private val acceptAllVerifier: HostKeyVerifier = { _, _ -> true }
+    private val acceptAllVerifier: suspend (String, ByteArray) -> Boolean = { _, _ -> true }
 
     // =========================================================================
     // exchangeVersions (via performHandshake partial test)
     // =========================================================================
 
     @Test
-    fun `exchangeVersions sends our version string`() {
+    fun `exchangeVersions sends our version string`() = runBlocking {
         val serverVersionLine = "SSH-2.0-OpenSSH_9.0\r\n"
-        val rawInput = ByteArrayInputStream(serverVersionLine.toByteArray(Charsets.US_ASCII))
-        val rawOutput = ByteArrayOutputStream()
-        val packetInput = ByteArrayInputStream(ByteArray(0))
-        val packetOutput = ByteArrayOutputStream()
+        val source = ByteArraySource(serverVersionLine.toByteArray(Charsets.US_ASCII))
+        val packetIO = AsyncPacketIO(source)
+        val transport = AsyncSshTransport(source, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(packetInput, packetOutput, acceptAllVerifier)
+        invokeSuspendMethod(transport, "exchangeVersions")
 
-        // Use reflection to call private exchangeVersions
-        val method = SshTransport::class.java.getDeclaredMethod(
-            "exchangeVersions",
-            java.io.InputStream::class.java,
-            java.io.OutputStream::class.java
-        )
-        method.isAccessible = true
-        method.invoke(transport, rawInput, rawOutput)
-
-        val sent = rawOutput.toString(Charsets.US_ASCII)
+        val sent = String(source.getWrittenBytes(), Charsets.US_ASCII)
         assertTrue(sent.startsWith("SSH-2.0-ArcShell"))
         assertTrue(sent.endsWith("\r\n"))
         assertEquals("SSH-2.0-OpenSSH_9.0", transport.serverVersion)
     }
 
     @Test
-    fun `exchangeVersions handles SSH-1_99 compatibility version`() {
+    fun `exchangeVersions handles SSH-1_99 compatibility version`() = runBlocking {
         val serverVersionLine = "SSH-1.99-OpenSSH_9.0\r\n"
-        val rawInput = ByteArrayInputStream(serverVersionLine.toByteArray(Charsets.US_ASCII))
-        val rawOutput = ByteArrayOutputStream()
-        val packetInput = ByteArrayInputStream(ByteArray(0))
-        val packetOutput = ByteArrayOutputStream()
+        val source = ByteArraySource(serverVersionLine.toByteArray(Charsets.US_ASCII))
+        val packetIO = AsyncPacketIO(source)
+        val transport = AsyncSshTransport(source, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(packetInput, packetOutput, acceptAllVerifier)
-
-        val method = SshTransport::class.java.getDeclaredMethod(
-            "exchangeVersions",
-            java.io.InputStream::class.java,
-            java.io.OutputStream::class.java
-        )
-        method.isAccessible = true
-        method.invoke(transport, rawInput, rawOutput)
+        invokeSuspendMethod(transport, "exchangeVersions")
 
         assertEquals("SSH-1.99-OpenSSH_9.0", transport.serverVersion)
     }
 
     @Test(expected = Exception::class)
     fun `exchangeVersions rejects non-SSH-2 version`() {
-        val serverVersionLine = "SSH-1.0-OldServer\r\n"
-        val rawInput = ByteArrayInputStream(serverVersionLine.toByteArray(Charsets.US_ASCII))
-        val rawOutput = ByteArrayOutputStream()
-        val packetInput = ByteArrayInputStream(ByteArray(0))
-        val packetOutput = ByteArrayOutputStream()
+        runBlocking {
+            val serverVersionLine = "SSH-1.0-OldServer\r\n"
+            val source = ByteArraySource(serverVersionLine.toByteArray(Charsets.US_ASCII))
+            val packetIO = AsyncPacketIO(source)
+            val transport = AsyncSshTransport(source, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(packetInput, packetOutput, acceptAllVerifier)
-
-        val method = SshTransport::class.java.getDeclaredMethod(
-            "exchangeVersions",
-            java.io.InputStream::class.java,
-            java.io.OutputStream::class.java
-        )
-        method.isAccessible = true
-        try {
-            method.invoke(transport, rawInput, rawOutput)
-        } catch (e: java.lang.reflect.InvocationTargetException) {
-            throw e.cause!!
+            invokeSuspendMethod(transport, "exchangeVersions")
         }
     }
 
@@ -109,31 +79,22 @@ class SshTransportTest {
     // =========================================================================
 
     @Test
-    fun `readVersionLine skips banner lines before SSH version`() {
+    fun `readVersionLine skips banner lines before SSH version`() = runBlocking {
         val input = ("Welcome to the server\r\n" +
                 "Authorized users only\r\n" +
                 "SSH-2.0-TestServer_1.0\r\n")
             .toByteArray(Charsets.US_ASCII)
-        val rawInput = ByteArrayInputStream(input)
-        val rawOutput = ByteArrayOutputStream()
-        val packetInput = ByteArrayInputStream(ByteArray(0))
-        val packetOutput = ByteArrayOutputStream()
+        val source = ByteArraySource(input)
+        val packetIO = AsyncPacketIO(source)
+        val transport = AsyncSshTransport(source, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(packetInput, packetOutput, acceptAllVerifier)
-
-        val method = SshTransport::class.java.getDeclaredMethod(
-            "exchangeVersions",
-            java.io.InputStream::class.java,
-            java.io.OutputStream::class.java
-        )
-        method.isAccessible = true
-        method.invoke(transport, rawInput, rawOutput)
+        invokeSuspendMethod(transport, "exchangeVersions")
 
         assertEquals("SSH-2.0-TestServer_1.0", transport.serverVersion)
     }
 
     @Test
-    fun `readVersionLine skips many banner lines before SSH version`() {
+    fun `readVersionLine skips many banner lines before SSH version`() = runBlocking {
         // Generates many short banner lines, all skipped until SSH-2.0 is found
         val manyBanners = StringBuilder()
         for (i in 0 until 500) {
@@ -141,68 +102,37 @@ class SshTransportTest {
         }
         manyBanners.append("SSH-2.0-LateComer\r\n")
 
-        val rawInput = ByteArrayInputStream(manyBanners.toString().toByteArray(Charsets.US_ASCII))
-        val rawOutput = ByteArrayOutputStream()
-        val packetInput = ByteArrayInputStream(ByteArray(0))
-        val packetOutput = ByteArrayOutputStream()
+        val source = ByteArraySource(manyBanners.toString().toByteArray(Charsets.US_ASCII))
+        val packetIO = AsyncPacketIO(source)
+        val transport = AsyncSshTransport(source, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(packetInput, packetOutput, acceptAllVerifier)
-
-        val method = SshTransport::class.java.getDeclaredMethod(
-            "exchangeVersions",
-            java.io.InputStream::class.java,
-            java.io.OutputStream::class.java
-        )
-        method.isAccessible = true
-        method.invoke(transport, rawInput, rawOutput)
+        invokeSuspendMethod(transport, "exchangeVersions")
 
         assertEquals("SSH-2.0-LateComer", transport.serverVersion)
     }
 
     @Test(expected = Exception::class)
     fun `readLine throws on connection closed during version exchange`() {
-        // Empty input = EOF = connection closed
-        val rawInput = ByteArrayInputStream(ByteArray(0))
-        val rawOutput = ByteArrayOutputStream()
-        val packetInput = ByteArrayInputStream(ByteArray(0))
-        val packetOutput = ByteArrayOutputStream()
+        runBlocking {
+            // Empty input = EOF = connection closed
+            val source = ByteArraySource(ByteArray(0))
+            val packetIO = AsyncPacketIO(source)
+            val transport = AsyncSshTransport(source, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(packetInput, packetOutput, acceptAllVerifier)
-
-        val method = SshTransport::class.java.getDeclaredMethod(
-            "exchangeVersions",
-            java.io.InputStream::class.java,
-            java.io.OutputStream::class.java
-        )
-        method.isAccessible = true
-        try {
-            method.invoke(transport, rawInput, rawOutput)
-        } catch (e: java.lang.reflect.InvocationTargetException) {
-            throw e.cause!!
+            invokeSuspendMethod(transport, "exchangeVersions")
         }
     }
 
     @Test(expected = Exception::class)
     fun `readLine throws on version line too long`() {
-        // A single line > 1024 bytes without newline
-        val longLine = ByteArray(1100) { 'A'.code.toByte() }
-        val rawInput = ByteArrayInputStream(longLine)
-        val rawOutput = ByteArrayOutputStream()
-        val packetInput = ByteArrayInputStream(ByteArray(0))
-        val packetOutput = ByteArrayOutputStream()
+        runBlocking {
+            // A single line > 1024 bytes without newline
+            val longLine = ByteArray(1100) { 'A'.code.toByte() }
+            val source = ByteArraySource(longLine)
+            val packetIO = AsyncPacketIO(source)
+            val transport = AsyncSshTransport(source, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(packetInput, packetOutput, acceptAllVerifier)
-
-        val method = SshTransport::class.java.getDeclaredMethod(
-            "exchangeVersions",
-            java.io.InputStream::class.java,
-            java.io.OutputStream::class.java
-        )
-        method.isAccessible = true
-        try {
-            method.invoke(transport, rawInput, rawOutput)
-        } catch (e: java.lang.reflect.InvocationTargetException) {
-            throw e.cause!!
+            invokeSuspendMethod(transport, "exchangeVersions")
         }
     }
 
@@ -211,19 +141,16 @@ class SshTransportTest {
     // =========================================================================
 
     @Test
-    fun `receivePacket drops IGNORE messages and returns next`() {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 64 * 1024)
-        val output = ByteArrayOutputStream()
+    fun `receivePacket drops IGNORE messages and returns next`() = runBlocking {
+        val pipe = PipeSource()
+        val packetIO = AsyncPacketIO(pipe)
+        val transport = AsyncSshTransport(pipe, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(pipeIn, output, acceptAllVerifier)
-
-        // Write IGNORE packet then a real DATA packet via packetIO
+        // Write IGNORE packet then a real DATA packet via a separate writer
         val ignorePacket = byteArrayOf(SshMsgType.IGNORE.toByte())
         val realPacket = byteArrayOf(SshMsgType.SERVICE_ACCEPT.toByte(), 0x42)
 
-        // Use a separate writer PacketIO to write to the pipe
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
+        val writer = AsyncPacketIO(pipe)
         writer.writePacket(ignorePacket)
         writer.writePacket(realPacket)
 
@@ -233,12 +160,10 @@ class SshTransportTest {
     }
 
     @Test
-    fun `receivePacket drops DEBUG messages and returns next`() {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 64 * 1024)
-        val output = ByteArrayOutputStream()
-
-        val transport = SshTransport(pipeIn, output, acceptAllVerifier)
+    fun `receivePacket drops DEBUG messages and returns next`() = runBlocking {
+        val pipe = PipeSource()
+        val packetIO = AsyncPacketIO(pipe)
+        val transport = AsyncSshTransport(pipe, packetIO, acceptAllVerifier)
 
         val debugPacket = SshBufferWriter()
             .writeByte(SshMsgType.DEBUG)
@@ -248,7 +173,7 @@ class SshTransportTest {
             .toByteArray()
         val realPacket = byteArrayOf(SshMsgType.NEWKEYS.toByte())
 
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
+        val writer = AsyncPacketIO(pipe)
         writer.writePacket(debugPacket)
         writer.writePacket(realPacket)
 
@@ -258,67 +183,65 @@ class SshTransportTest {
 
     @Test(expected = SshProtocolException::class)
     fun `receivePacket throws on DISCONNECT`() {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 64 * 1024)
-        val output = ByteArrayOutputStream()
+        runBlocking {
+            val pipe = PipeSource()
+            val packetIO = AsyncPacketIO(pipe)
+            val transport = AsyncSshTransport(pipe, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(pipeIn, output, acceptAllVerifier)
+            val disconnectPacket = SshBufferWriter()
+                .writeByte(SshMsgType.DISCONNECT)
+                .writeUint32(11) // BY_APPLICATION
+                .writeUtf8("Server shutting down")
+                .writeUtf8("en")
+                .toByteArray()
 
-        val disconnectPacket = SshBufferWriter()
-            .writeByte(SshMsgType.DISCONNECT)
-            .writeUint32(11) // BY_APPLICATION
-            .writeUtf8("Server shutting down")
-            .writeUtf8("en")
-            .toByteArray()
+            val writer = AsyncPacketIO(pipe)
+            writer.writePacket(disconnectPacket)
 
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
-        writer.writePacket(disconnectPacket)
-
-        transport.receivePacket()
+            transport.receivePacket()
+        }
     }
 
     @Test(expected = SshProtocolException::class)
     fun `receivePacket throws on DISCONNECT with minimal data`() {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 64 * 1024)
-        val output = ByteArrayOutputStream()
+        runBlocking {
+            val pipe = PipeSource()
+            val packetIO = AsyncPacketIO(pipe)
+            val transport = AsyncSshTransport(pipe, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(pipeIn, output, acceptAllVerifier)
+            // DISCONNECT with just reason code (4 bytes), no description
+            val disconnectPacket = SshBufferWriter()
+                .writeByte(SshMsgType.DISCONNECT)
+                .writeUint32(11)
+                .toByteArray()
 
-        // DISCONNECT with just reason code (4 bytes), no description
-        val disconnectPacket = SshBufferWriter()
-            .writeByte(SshMsgType.DISCONNECT)
-            .writeUint32(11)
-            .toByteArray()
+            val writer = AsyncPacketIO(pipe)
+            writer.writePacket(disconnectPacket)
 
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
-        writer.writePacket(disconnectPacket)
-
-        transport.receivePacket()
+            transport.receivePacket()
+        }
     }
 
     @Test(expected = SshProtocolException::class)
     fun `receivePacket throws on empty packet`() {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 64 * 1024)
-        val output = ByteArrayOutputStream()
+        runBlocking {
+            val pipe = PipeSource()
+            val packetIO = AsyncPacketIO(pipe)
+            val transport = AsyncSshTransport(pipe, packetIO, acceptAllVerifier)
 
-        val transport = SshTransport(pipeIn, output, acceptAllVerifier)
+            val writer = AsyncPacketIO(pipe)
+            writer.writePacket(byteArrayOf()) // empty payload
 
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
-        writer.writePacket(byteArrayOf()) // empty payload
-
-        transport.receivePacket()
+            transport.receivePacket()
+        }
     }
 
     @Test
-    fun `receivePacket drops multiple IGNORE then returns real packet`() {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 64 * 1024)
-        val output = ByteArrayOutputStream()
-
-        val transport = SshTransport(pipeIn, output, acceptAllVerifier)
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
+    fun `receivePacket drops multiple IGNORE then returns real packet`() = runBlocking {
+        val pipe = PipeSource()
+        val packetIO = AsyncPacketIO(pipe)
+        val transport = AsyncSshTransport(pipe, packetIO, acceptAllVerifier)
+        val writer = AsyncPacketIO(pipe)
 
         writer.writePacket(byteArrayOf(SshMsgType.IGNORE.toByte()))
         writer.writePacket(byteArrayOf(SshMsgType.IGNORE.toByte()))
@@ -335,41 +258,35 @@ class SshTransportTest {
     // =========================================================================
 
     @Test
-    fun `disconnect sends DISCONNECT packet`() {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 64 * 1024)
-        val rawOutput = ByteArrayOutputStream()
-
-        val transport = SshTransport(pipeIn, rawOutput, acceptAllVerifier)
+    fun `disconnect sends DISCONNECT packet`() = runBlocking {
+        val source = ByteArraySource(ByteArray(0))
+        val packetIO = AsyncPacketIO(source)
+        val transport = AsyncSshTransport(source, packetIO, acceptAllVerifier)
 
         transport.disconnect(11, "User requested disconnect")
 
         // After disconnect, output should contain the DISCONNECT packet
-        assertTrue(rawOutput.size() > 0)
+        assertTrue(source.getWrittenBytes().isNotEmpty())
     }
 
     @Test
-    fun `disconnect with default parameters works`() {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 64 * 1024)
-        val rawOutput = ByteArrayOutputStream()
-
-        val transport = SshTransport(pipeIn, rawOutput, acceptAllVerifier)
+    fun `disconnect with default parameters works`() = runBlocking {
+        val source = ByteArraySource(ByteArray(0))
+        val packetIO = AsyncPacketIO(source)
+        val transport = AsyncSshTransport(source, packetIO, acceptAllVerifier)
 
         transport.disconnect()
-        assertTrue(rawOutput.size() > 0)
+        assertTrue(source.getWrittenBytes().isNotEmpty())
     }
 
     @Test
-    fun `disconnect on already closed connection does not throw`() {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 64 * 1024)
-        val rawOutput = ByteArrayOutputStream()
+    fun `disconnect on already closed connection does not throw`() = runBlocking {
+        val source = ByteArraySource(ByteArray(0))
+        val packetIO = AsyncPacketIO(source)
+        val transport = AsyncSshTransport(source, packetIO, acceptAllVerifier)
+        packetIO.close()
 
-        val transport = SshTransport(pipeIn, rawOutput, acceptAllVerifier)
-        transport.packetIO.close()
-
-        // Should not throw even when streams are closed
+        // Should not throw even when source is closed
         transport.disconnect()
     }
 
@@ -378,13 +295,14 @@ class SshTransportTest {
     // =========================================================================
 
     @Test
-    fun `sendPacket and receivePacket roundtrip`() {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 64 * 1024)
+    fun `sendPacket and receivePacket roundtrip`() = runBlocking {
+        val pipe = PipeSource()
+        val sendPacketIO = AsyncPacketIO(pipe)
+        val recvPacketIO = AsyncPacketIO(pipe)
 
         // Use two transports: one writing to pipe, one reading from pipe
-        val sendTransport = SshTransport(ByteArrayInputStream(ByteArray(0)), pipeOut, acceptAllVerifier)
-        val recvTransport = SshTransport(pipeIn, ByteArrayOutputStream(), acceptAllVerifier)
+        val sendTransport = AsyncSshTransport(pipe, sendPacketIO, acceptAllVerifier)
+        val recvTransport = AsyncSshTransport(pipe, recvPacketIO, acceptAllVerifier)
 
         val payload = byteArrayOf(SshMsgType.SERVICE_REQUEST.toByte(), 0x01, 0x02, 0x03)
         sendTransport.sendPacket(payload)
@@ -428,12 +346,11 @@ class SshTransportTest {
             .toByteArray()
 
         // Call verifyHostKeySignature via reflection
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
-        val method = SshTransport::class.java.getDeclaredMethod(
+        val method = AsyncSshTransport::class.java.getDeclaredMethod(
             "verifyHostKeySignature",
             ByteArray::class.java,
             ByteArray::class.java,
@@ -465,12 +382,11 @@ class SshTransportTest {
             .writeString(badSigData)
             .toByteArray()
 
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
-        val method = SshTransport::class.java.getDeclaredMethod(
+        val method = AsyncSshTransport::class.java.getDeclaredMethod(
             "verifyHostKeySignature",
             ByteArray::class.java,
             ByteArray::class.java,
@@ -515,12 +431,11 @@ class SshTransportTest {
             .writeString(sigData)
             .toByteArray()
 
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
-        val method = SshTransport::class.java.getDeclaredMethod(
+        val method = AsyncSshTransport::class.java.getDeclaredMethod(
             "verifyHostKeySignature",
             ByteArray::class.java,
             ByteArray::class.java,
@@ -555,12 +470,11 @@ class SshTransportTest {
             .writeString(sigData)
             .toByteArray()
 
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
-        val method = SshTransport::class.java.getDeclaredMethod(
+        val method = AsyncSshTransport::class.java.getDeclaredMethod(
             "verifyHostKeySignature",
             ByteArray::class.java,
             ByteArray::class.java,
@@ -595,12 +509,11 @@ class SshTransportTest {
             .writeString(sigData)
             .toByteArray()
 
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
-        val method = SshTransport::class.java.getDeclaredMethod(
+        val method = AsyncSshTransport::class.java.getDeclaredMethod(
             "verifyHostKeySignature",
             ByteArray::class.java,
             ByteArray::class.java,
@@ -683,12 +596,11 @@ class SshTransportTest {
             .writeString(sshSigData)
             .toByteArray()
 
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
-        val method = SshTransport::class.java.getDeclaredMethod(
+        val method = AsyncSshTransport::class.java.getDeclaredMethod(
             "verifyHostKeySignature",
             ByteArray::class.java,
             ByteArray::class.java,
@@ -722,12 +634,11 @@ class SshTransportTest {
             .writeString(ByteArray(40))
             .toByteArray()
 
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
-        val method = SshTransport::class.java.getDeclaredMethod(
+        val method = AsyncSshTransport::class.java.getDeclaredMethod(
             "verifyHostKeySignature",
             ByteArray::class.java,
             ByteArray::class.java,
@@ -747,30 +658,27 @@ class SshTransportTest {
 
     @Test
     fun `kexAlgorithmName returns none before handshake`() {
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
         assertEquals("none", transport.kexAlgorithmName)
     }
 
     @Test
     fun `sessionId is empty before handshake`() {
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
         assertEquals(0, transport.sessionId.size)
     }
 
     @Test
     fun `serverVersion is empty before handshake`() {
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
         assertEquals("", transport.serverVersion)
     }
@@ -781,12 +689,11 @@ class SshTransportTest {
 
     @Test
     fun `encodeEcdsaDer produces valid DER`() {
-        val transport = SshTransport(
-            ByteArrayInputStream(ByteArray(0)),
-            ByteArrayOutputStream(),
-            acceptAllVerifier
+        val source = ByteArraySource(ByteArray(0))
+        val transport = AsyncSshTransport(
+            source, AsyncPacketIO(source), acceptAllVerifier
         )
-        val method = SshTransport::class.java.getDeclaredMethod(
+        val method = AsyncSshTransport::class.java.getDeclaredMethod(
             "encodeEcdsaDer",
             BigInteger::class.java,
             BigInteger::class.java
@@ -801,5 +708,26 @@ class SshTransportTest {
         assertEquals(0x30, der[0].toInt())
         // Should contain two INTEGER elements (0x02)
         assertTrue(der.count { it.toInt() == 0x02 } >= 2)
+    }
+
+    // =========================================================================
+    // Helper: invoke a private suspend method via reflection
+    // =========================================================================
+
+    @Suppress("UNCHECKED_CAST")
+    private suspend fun invokeSuspendMethod(target: Any, methodName: String) {
+        // Kotlin suspend functions compile to a method with an extra Continuation parameter.
+        // Find the method by name (there will be one with Continuation as last param).
+        val method = target::class.java.declaredMethods.first {
+            it.name == methodName && it.parameterTypes.lastOrNull() == kotlin.coroutines.Continuation::class.java
+        }
+        method.isAccessible = true
+        suspendCoroutineUninterceptedOrReturn<Any?> { cont ->
+            try {
+                method.invoke(target, cont)
+            } catch (e: java.lang.reflect.InvocationTargetException) {
+                throw e.cause ?: e
+            }
+        }
     }
 }

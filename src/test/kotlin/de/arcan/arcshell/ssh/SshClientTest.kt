@@ -1,12 +1,9 @@
 package de.arcan.arcshell.ssh
 
-import de.arcan.arcshell.ssh.auth.AuthResult
-import de.arcan.arcshell.ssh.auth.Prompt
-import de.arcan.arcshell.ssh.auth.SshAuthenticator
-import de.arcan.arcshell.ssh.transport.HostKeyVerifier
+import de.arcan.arcshell.ssh.nio.AsyncSshClient
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -97,103 +94,89 @@ class SshClientTest {
     }
 
     // =========================================================================
-    // SshClient state tests (no real network)
+    // AsyncSshClient state tests (no real network)
     // =========================================================================
 
-    private val dummyVerifier: HostKeyVerifier = { _, _ -> true }
+    private val dummyVerifier: suspend (String, ByteArray) -> Boolean = { _, _ -> true }
 
     @Test
     fun `isConnected returns false initially`() {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         assertFalse(client.isConnected)
     }
 
     @Test
     fun `transportLayer is null initially`() {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
-        assertNull(client.transportLayer)
+        val client = AsyncSshClient(config, dummyVerifier)
+        assertTrue(client.transportLayer == null)
     }
 
     @Test
     fun `kexAlgorithm returns none when not connected`() {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         assertEquals("none", client.kexAlgorithm)
     }
 
     @Test
     fun `serverVersion returns empty when not connected`() {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         assertEquals("", client.serverVersion)
     }
 
     // --- Error cases for methods called before connect ---
 
     @Test(expected = IllegalStateException::class)
-    fun `authPassword throws when not connected`() {
+    fun `authPassword throws when not connected`() { runBlocking {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         client.authPassword("password")
-    }
+    } }
 
     @Test(expected = IllegalStateException::class)
-    fun `authPublicKey throws when not connected`() {
+    fun `authPublicKey throws when not connected`() { runBlocking {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         client.authPublicKey("ssh-ed25519", byteArrayOf(1), { it })
-    }
+    } }
 
     @Test(expected = IllegalStateException::class)
-    fun `authKeyboardInteractive throws when not connected`() {
+    fun `authKeyboardInteractive throws when not connected`() { runBlocking {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         client.authKeyboardInteractive { _, _, _ -> emptyList() }
-    }
+    } }
 
     @Test(expected = IllegalStateException::class)
-    fun `queryAuthMethods throws when not connected`() {
+    fun `queryAuthMethods throws when not connected`() { runBlocking {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         client.queryAuthMethods()
-    }
+    } }
 
     @Test(expected = IllegalStateException::class)
-    fun `openSession throws when not connected`() {
+    fun `openSession throws when not connected`() { runBlocking {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         client.openSession()
-    }
+    } }
 
     @Test(expected = IllegalStateException::class)
-    fun `openDirectTcp throws when not connected`() {
+    fun `openDirectTcp throws when not connected`() { runBlocking {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         client.openDirectTcp("remote.host", 8080)
-    }
-
-    @Test(expected = IllegalStateException::class)
-    fun `requestRemoteForward throws when not connected`() {
-        val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
-        client.requestRemoteForward("0.0.0.0", 9090)
-    }
-
-    @Test(expected = IllegalStateException::class)
-    fun `processMessages throws when not connected`() {
-        val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
-        client.processMessages()
-    }
+    } }
 
     // --- disconnect clears state ---
 
     @Test
     fun `disconnect on not-connected client does not throw`() {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         // Should not throw
         client.disconnect()
         assertFalse(client.isConnected)
@@ -202,11 +185,11 @@ class SshClientTest {
     @Test
     fun `disconnect clears state`() {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         client.disconnect()
 
         assertFalse(client.isConnected)
-        assertNull(client.transportLayer)
+        assertTrue(client.transportLayer == null)
         assertEquals("none", client.kexAlgorithm)
         assertEquals("", client.serverVersion)
     }
@@ -214,7 +197,7 @@ class SshClientTest {
     @Test
     fun `multiple disconnects are safe`() {
         val config = SshConfig(hostname = "localhost", username = "user")
-        val client = SshClient(config, dummyVerifier)
+        val client = AsyncSshClient(config, dummyVerifier)
         client.disconnect()
         client.disconnect()
         client.disconnect()

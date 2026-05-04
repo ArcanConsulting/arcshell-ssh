@@ -1,36 +1,43 @@
-package de.arcan.arcshell.ssh.connection
+package de.arcan.arcshell.ssh.nio
 
 import de.arcan.arcshell.ssh.SshMsgType
 import de.arcan.arcshell.ssh.SshService
 import de.arcan.arcshell.ssh.transport.SshBufferReader
 import de.arcan.arcshell.ssh.transport.SshBufferWriter
 import de.arcan.arcshell.ssh.transport.SshProtocolException
-import de.arcan.arcshell.ssh.transport.SshTransport
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * SSH connection protocol (RFC 4254). Manages channels, handles multiplexing,
+ * Async SSH connection protocol (RFC 4254). Manages channels, handles multiplexing,
  * window management, and channel lifecycle.
+ *
+ * Non-blocking coroutine-based replacement for
+ * [de.arcan.arcshell.ssh.connection.SshConnection].
+ *
+ * Key differences from the blocking version:
+ * - Channel open uses per-channel CompletableDeferred instead of a shared BlockingQueue
+ * - Global request responses use a coroutine Channel
+ * - No messageLoopActive flag — the message loop is always a coroutine
+ * - No readChannelResponse() — all reads go through the message loop
  */
-class SshConnection(private val transport: SshTransport) {
+class AsyncSshConnection(private val transport: AsyncSshTransport) {
 
-    private val channels = ConcurrentHashMap<Int, Channel>()
+    private val channels = ConcurrentHashMap<Int, AsyncChannel>()
     private val nextLocalId = AtomicInteger(0)
 
-    /** True when processMessages() is running — channel opens use the response queue. */
-    val messageLoopActive = AtomicBoolean(false)
+    /** Pending channel open responses, keyed by local channel ID. */
+    private val channelOpenResponses = ConcurrentHashMap<Int, CompletableDeferred<ByteArray>>()
 
-    /** Queue for CHANNEL_OPEN_CONFIRMATION/FAILURE responses when message loop is active. */
-    private val channelOpenResponses = LinkedBlockingQueue<ByteArray>()
-
-    /** Queue for REQUEST_SUCCESS/FAILURE responses when message loop is active. */
-    private val globalRequestResponses = LinkedBlockingQueue<ByteArray>()
+    /** Queue for REQUEST_SUCCESS/FAILURE responses. */
+    private val globalRequestResponses = Channel<ByteArray>(Channel.UNLIMITED)
 
     /** Request the ssh-connection service. */
-    fun requestConnectionService() {
+    suspend fun requestConnectionService() {
         val payload = SshBufferWriter()
             .writeByte(SshMsgType.SERVICE_REQUEST)
             .writeUtf8(SshService.CONNECTION)
@@ -49,12 +56,17 @@ class SshConnection(private val transport: SshTransport) {
      * @param initialWindowSize how many bytes the server may send before we must adjust
      * @param maxPacketSize maximum data packet size within this channel
      */
-    fun openSession(
+    suspend fun openSession(
         initialWindowSize: Int = DEFAULT_WINDOW_SIZE,
         maxPacketSize: Int = DEFAULT_MAX_PACKET_SIZE
-    ): SessionChannel {
+    ): AsyncSessionChannel {
         val localId = nextLocalId.getAndIncrement()
-        val channel = SessionChannel(localId, transport)
+        val channel = AsyncSessionChannel(localId, transport)
+        channels[localId] = channel
+
+        // Register deferred before sending to avoid race with message loop
+        val deferred = CompletableDeferred<ByteArray>()
+        channelOpenResponses[localId] = deferred
 
         // Send CHANNEL_OPEN
         val payload = SshBufferWriter()
@@ -66,12 +78,10 @@ class SshConnection(private val transport: SshTransport) {
             .toByteArray()
         transport.sendPacket(payload)
 
-        // Read response: direct from transport if pre-message-loop, else via queue
-        val response = if (messageLoopActive.get()) {
-            channelOpenResponses.take() // blocks until processMessage dispatches it
-        } else {
-            readChannelResponse()
-        }
+        // Await response from message loop
+        val response = deferred.await()
+        channelOpenResponses.remove(localId)
+
         when (response[0].toInt()) {
             SshMsgType.CHANNEL_OPEN_CONFIRMATION -> {
                 val reader = SshBufferReader(response, 1)
@@ -81,37 +91,45 @@ class SshConnection(private val transport: SshTransport) {
                 val remoteMaxPacketSize = reader.readUint32().toInt()
 
                 channel.remoteId = senderChannel
-                channel.remoteWindowSize = remoteWindowSize
+                channel.remoteWindowSize.set(remoteWindowSize)
                 channel.remoteMaxPacketSize = remoteMaxPacketSize
-                channel.localWindowSize = initialWindowSize.toLong()
+                channel.localWindowSize.set(initialWindowSize.toLong())
                 channel.isOpen = true
-                channels[localId] = channel
                 return channel
             }
             SshMsgType.CHANNEL_OPEN_FAILURE -> {
+                channels.remove(localId)
                 val reader = SshBufferReader(response, 1)
                 reader.readUint32() // recipient channel
                 val reasonCode = reader.readUint32().toInt()
                 val description = reader.readUtf8()
                 throw SshProtocolException("Channel open failed: reason=$reasonCode $description")
             }
-            else -> throw SshProtocolException("Unexpected response to CHANNEL_OPEN: ${response[0]}")
+            else -> {
+                channels.remove(localId)
+                throw SshProtocolException("Unexpected response to CHANNEL_OPEN: ${response[0]}")
+            }
         }
     }
 
     /**
      * Open a direct TCP/IP channel for local port forwarding.
      */
-    fun openDirectTcp(
+    suspend fun openDirectTcp(
         remoteHost: String,
         remotePort: Int,
         originatorAddress: String = "127.0.0.1",
         originatorPort: Int = 0,
         initialWindowSize: Int = DEFAULT_WINDOW_SIZE,
         maxPacketSize: Int = DEFAULT_MAX_PACKET_SIZE
-    ): Channel {
+    ): AsyncChannel {
         val localId = nextLocalId.getAndIncrement()
-        val channel = Channel(localId, transport)
+        val channel = AsyncChannel(localId, transport)
+        channels[localId] = channel
+
+        // Register deferred before sending to avoid race with message loop
+        val deferred = CompletableDeferred<ByteArray>()
+        channelOpenResponses[localId] = deferred
 
         val payload = SshBufferWriter()
             .writeByte(SshMsgType.CHANNEL_OPEN)
@@ -126,32 +144,38 @@ class SshConnection(private val transport: SshTransport) {
             .toByteArray()
         transport.sendPacket(payload)
 
-        val response = if (messageLoopActive.get()) channelOpenResponses.take() else readChannelResponse()
+        // Await response from message loop
+        val response = deferred.await()
+        channelOpenResponses.remove(localId)
+
         when (response[0].toInt()) {
             SshMsgType.CHANNEL_OPEN_CONFIRMATION -> {
                 val reader = SshBufferReader(response, 1)
                 reader.readUint32() // recipient
                 channel.remoteId = reader.readUint32().toInt()
-                channel.remoteWindowSize = reader.readUint32()
+                channel.remoteWindowSize.set(reader.readUint32())
                 channel.remoteMaxPacketSize = reader.readUint32().toInt()
-                channel.localWindowSize = initialWindowSize.toLong()
+                channel.localWindowSize.set(initialWindowSize.toLong())
                 channel.isOpen = true
-                channels[localId] = channel
                 return channel
             }
             SshMsgType.CHANNEL_OPEN_FAILURE -> {
+                channels.remove(localId)
                 val reader = SshBufferReader(response, 1)
                 reader.readUint32()
                 val reason = reader.readUint32().toInt()
                 val desc = reader.readUtf8()
                 throw SshProtocolException("Direct TCP channel failed: reason=$reason $desc")
             }
-            else -> throw SshProtocolException("Unexpected: ${response[0]}")
+            else -> {
+                channels.remove(localId)
+                throw SshProtocolException("Unexpected: ${response[0]}")
+            }
         }
     }
 
     /** Request remote port forwarding (server listens, we connect back). */
-    fun requestRemoteForward(bindAddress: String, bindPort: Int): Boolean {
+    suspend fun requestRemoteForward(bindAddress: String, bindPort: Int): Boolean {
         val payload = SshBufferWriter()
             .writeByte(SshMsgType.GLOBAL_REQUEST)
             .writeUtf8("tcpip-forward")
@@ -161,17 +185,31 @@ class SshConnection(private val transport: SshTransport) {
             .toByteArray()
         transport.sendPacket(payload)
 
-        val response = if (messageLoopActive.get()) {
-            globalRequestResponses.take()
-        } else {
-            transport.receivePacket()
-        }
+        val response = globalRequestResponses.receive()
         return response[0].toInt() == SshMsgType.REQUEST_SUCCESS
     }
 
     /**
-     * Process incoming channel messages. Call this in a loop from the
-     * reader thread. Dispatches data/eof/close to the appropriate channel.
+     * Main message loop. Reads packets from the transport and dispatches them
+     * to the appropriate channel or response queue. Runs until the coroutine
+     * is cancelled or a DISCONNECT is received.
+     */
+    suspend fun messageLoop() {
+        try {
+            while (currentCoroutineContext().isActive) {
+                val payload = transport.receivePacket()
+                if (!processMessage(payload)) break
+            }
+        } finally {
+            channels.values.forEach { it.onClose() }
+            channels.clear()
+        }
+    }
+
+    /**
+     * Process a single incoming message. Dispatches data/eof/close to the
+     * appropriate channel, and channel open/global request responses to
+     * their waiting coroutines.
      *
      * @return false if the connection should be closed
      */
@@ -219,19 +257,26 @@ class SshConnection(private val transport: SshTransport) {
                 val channelId = reader.readUint32().toInt()
                 channels[channelId]?.onRequestFailure()
             }
-            SshMsgType.CHANNEL_OPEN_CONFIRMATION, SshMsgType.CHANNEL_OPEN_FAILURE -> {
-                // Dispatched to openSession/openDirectTcp waiting on the queue
-                channelOpenResponses.put(payload)
+            SshMsgType.CHANNEL_OPEN_CONFIRMATION -> {
+                // Find the waiting coroutine by recipient channel ID (our local ID)
+                val recipientId = SshBufferReader(payload, 1).readUint32().toInt()
+                channelOpenResponses[recipientId]?.complete(payload)
+            }
+            SshMsgType.CHANNEL_OPEN_FAILURE -> {
+                // Find the waiting coroutine by recipient channel ID (our local ID)
+                val recipientId = SshBufferReader(payload, 1).readUint32().toInt()
+                channelOpenResponses[recipientId]?.complete(payload)
             }
             SshMsgType.REQUEST_SUCCESS, SshMsgType.REQUEST_FAILURE -> {
-                // Dispatched to requestRemoteForward waiting on the queue
-                globalRequestResponses.put(payload)
+                globalRequestResponses.trySend(payload)
             }
             SshMsgType.GLOBAL_REQUEST -> {
                 val requestName = reader.readUtf8()
                 val wantReply = reader.readBoolean()
                 if (wantReply) {
-                    transport.sendPacket(SshBufferWriter().writeByte(SshMsgType.REQUEST_FAILURE).toByteArray())
+                    transport.sendPacketBlocking(
+                        SshBufferWriter().writeByte(SshMsgType.REQUEST_FAILURE).toByteArray()
+                    )
                 }
             }
             SshMsgType.DISCONNECT -> return false
@@ -242,36 +287,7 @@ class SshConnection(private val transport: SshTransport) {
         return true
     }
 
-    fun getChannel(localId: Int): Channel? = channels[localId]
-
-    /**
-     * Read packets until we get a channel-level response (OPEN_CONFIRMATION, OPEN_FAILURE).
-     * Handles GLOBAL_REQUEST and other non-channel messages that the server may send
-     * between auth and the first channel open (e.g. ext-info, no-more-sessions).
-     */
-    private fun readChannelResponse(): ByteArray {
-        while (true) {
-            val response = transport.receivePacket()
-            when (response[0].toInt()) {
-                SshMsgType.CHANNEL_OPEN_CONFIRMATION,
-                SshMsgType.CHANNEL_OPEN_FAILURE -> return response
-                SshMsgType.GLOBAL_REQUEST -> {
-                    // Server global request (e.g. hostkeys-00@openssh.com) — reply if wanted
-                    val reader = SshBufferReader(response, 1)
-                    reader.readUtf8() // request name
-                    val wantReply = reader.readBoolean()
-                    if (wantReply) {
-                        transport.sendPacket(
-                            SshBufferWriter().writeByte(SshMsgType.REQUEST_FAILURE).toByteArray()
-                        )
-                    }
-                }
-                else -> {
-                    // Skip unknown messages (EXT_INFO type 7, etc.)
-                }
-            }
-        }
-    }
+    fun getChannel(localId: Int): AsyncChannel? = channels[localId]
 
     companion object {
         const val DEFAULT_WINDOW_SIZE = 2 * 1024 * 1024 // 2 MB

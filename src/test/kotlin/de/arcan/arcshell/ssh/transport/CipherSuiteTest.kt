@@ -19,7 +19,9 @@ class CipherRegistryTest {
     fun `all ciphers have correct key sizes`() {
         CipherRegistry.getPreferred().forEach { cipher ->
             assertTrue("Key size must be positive: ${cipher.name}", cipher.keySize > 0)
-            assertTrue("IV size must be positive: ${cipher.name}", cipher.ivSize > 0)
+            if (!CipherRegistry.isChaCha(cipher.name)) {
+                assertTrue("IV size must be positive: ${cipher.name}", cipher.ivSize > 0)
+            }
         }
     }
 

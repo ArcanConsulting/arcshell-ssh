@@ -1,21 +1,19 @@
 package de.arcan.arcshell.ssh.transport
 
 import de.arcan.arcshell.ssh.SshMsgType
+import de.arcan.arcshell.ssh.nio.AsyncPacketIO
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
-import java.io.PipedInputStream
-import java.io.PipedOutputStream
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Full coverage tests for [PacketIO] and [CryptoState]:
+ * Full coverage tests for [AsyncPacketIO] and [CryptoState]:
  * - readPlaintextPacket / writePlaintextPacket roundtrip
  * - readEncryptedPacket / writeEncryptedPacket with CTR mode
  * - AEAD read/write paths with GCM cipher
@@ -33,7 +31,7 @@ class PacketIOFullTest {
     // =========================================================================
 
     @Test
-    fun `plaintext roundtrip with single byte`() {
+    fun `plaintext roundtrip with single byte`() = runBlocking {
         val pipe = createPipe()
         pipe.writer.writePacket(byteArrayOf(20))
         val result = pipe.reader.readPacket()
@@ -42,7 +40,7 @@ class PacketIOFullTest {
     }
 
     @Test
-    fun `plaintext roundtrip with exact block boundary payload`() {
+    fun `plaintext roundtrip with exact block boundary payload`() = runBlocking {
         // 8-byte blockSize for plaintext: payload should trigger padding edge case
         // unpadded = 5 + payloadSize; if payloadSize = 3, unpadded = 8
         // padding = 8 - (8 % 8) = 0, which is < 4, so += 8 => padding = 8
@@ -53,7 +51,7 @@ class PacketIOFullTest {
     }
 
     @Test
-    fun `plaintext roundtrip with payload that needs minimum padding`() {
+    fun `plaintext roundtrip with payload that needs minimum padding`() = runBlocking {
         // unpadded = 5 + 2 = 7; padding = 8 - (7 % 8) = 1, which < 4, += 8 => 9
         val payload = byteArrayOf(1, 2)
         val pipe = createPipe()
@@ -62,7 +60,7 @@ class PacketIOFullTest {
     }
 
     @Test
-    fun `plaintext roundtrip with empty payload`() {
+    fun `plaintext roundtrip with empty payload`() = runBlocking {
         val pipe = createPipe()
         pipe.writer.writePacket(byteArrayOf())
         val result = pipe.reader.readPacket()
@@ -70,7 +68,7 @@ class PacketIOFullTest {
     }
 
     @Test
-    fun `plaintext roundtrip with large payload`() {
+    fun `plaintext roundtrip with large payload`() = runBlocking {
         val payload = ByteArray(10000) { (it % 256).toByte() }
         val pipe = createPipe()
         pipe.writer.writePacket(payload)
@@ -78,16 +76,16 @@ class PacketIOFullTest {
     }
 
     @Test
-    fun `sequence number increments after write`() {
-        val output = ByteArrayOutputStream()
-        val packetIO = PacketIO(ByteArrayInputStream(ByteArray(0)), output)
+    fun `sequence number increments after write`() = runBlocking {
+        val source = ByteArraySource(ByteArray(0))
+        val packetIO = AsyncPacketIO(source)
 
         packetIO.writePacket(byteArrayOf(1))
         packetIO.writePacket(byteArrayOf(2))
         packetIO.writePacket(byteArrayOf(3))
 
         // Verify all three writes succeeded (sequence increments internally)
-        assertTrue(output.size() > 0)
+        assertTrue(source.getWrittenBytes().isNotEmpty())
     }
 
     // =========================================================================
@@ -95,7 +93,7 @@ class PacketIOFullTest {
     // =========================================================================
 
     @Test
-    fun `CTR encrypted write and read roundtrip`() {
+    fun `CTR encrypted write and read roundtrip`() = runBlocking {
         val key = ByteArray(32) { (it + 1).toByte() }
         val iv = ByteArray(16) { (it + 0x10).toByte() }
         val macKey = ByteArray(32) { (it + 0x20).toByte() }
@@ -108,13 +106,11 @@ class PacketIOFullTest {
         val sendCrypto = CryptoState(sendCipher, sendMac, 32)
         val recvCrypto = CryptoState(recvCipher, recvMac, 32)
 
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 256 * 1024)
-
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
+        val pipe = PipeSource()
+        val writer = AsyncPacketIO(pipe)
         writer.sendCipher = sendCrypto
 
-        val reader = PacketIO(pipeIn, ByteArrayOutputStream())
+        val reader = AsyncPacketIO(pipe)
         reader.recvCipher = recvCrypto
 
         val payload = byteArrayOf(SshMsgType.SERVICE_REQUEST.toByte(), 0x01, 0x02, 0x03)
@@ -125,7 +121,7 @@ class PacketIOFullTest {
     }
 
     @Test
-    fun `CTR encrypted multiple packets roundtrip`() {
+    fun `CTR encrypted multiple packets roundtrip`() = runBlocking {
         val key = ByteArray(32) { (it + 5).toByte() }
         val iv = ByteArray(16) { (it + 0x30).toByte() }
         val macKey = ByteArray(32) { (it + 0x40).toByte() }
@@ -138,13 +134,11 @@ class PacketIOFullTest {
         val sendCrypto = CryptoState(sendCipher, sendMac, 32)
         val recvCrypto = CryptoState(recvCipher, recvMac, 32)
 
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 256 * 1024)
-
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
+        val pipe = PipeSource()
+        val writer = AsyncPacketIO(pipe)
         writer.sendCipher = sendCrypto
 
-        val reader = PacketIO(pipeIn, ByteArrayOutputStream())
+        val reader = AsyncPacketIO(pipe)
         reader.recvCipher = recvCrypto
 
         val payload1 = byteArrayOf(20, 1, 2, 3, 4, 5)
@@ -161,7 +155,7 @@ class PacketIOFullTest {
     }
 
     @Test
-    fun `CTR encrypted without MAC works`() {
+    fun `CTR encrypted without MAC works`() = runBlocking {
         val key = ByteArray(32) { (it + 1).toByte() }
         val iv = ByteArray(16) { (it + 0x10).toByte() }
 
@@ -171,13 +165,11 @@ class PacketIOFullTest {
         val sendCrypto = CryptoState(sendCipher, null, 0)
         val recvCrypto = CryptoState(recvCipher, null, 0)
 
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 256 * 1024)
-
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
+        val pipe = PipeSource()
+        val writer = AsyncPacketIO(pipe)
         writer.sendCipher = sendCrypto
 
-        val reader = PacketIO(pipeIn, ByteArrayOutputStream())
+        val reader = AsyncPacketIO(pipe)
         reader.recvCipher = recvCrypto
 
         val payload = byteArrayOf(5, 0x41, 0x42, 0x43)
@@ -191,7 +183,7 @@ class PacketIOFullTest {
     // =========================================================================
 
     @Test
-    fun `AEAD GCM encrypted write and read roundtrip`() {
+    fun `AEAD GCM encrypted write and read roundtrip`() = runBlocking {
         val key = ByteArray(32) { (it + 1).toByte() }
         val baseIv = ByteArray(12) { (it + 0x50).toByte() }
         val aesKey = SecretKeySpec(key, "AES")
@@ -209,13 +201,11 @@ class PacketIOFullTest {
             aesKey = aesKey, baseIv = baseIv
         )
 
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 256 * 1024)
-
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
+        val pipe = PipeSource()
+        val writer = AsyncPacketIO(pipe)
         writer.sendCipher = sendCrypto
 
-        val reader = PacketIO(pipeIn, ByteArrayOutputStream())
+        val reader = AsyncPacketIO(pipe)
         reader.recvCipher = recvCrypto
 
         val payload = byteArrayOf(SshMsgType.CHANNEL_DATA.toByte(), 0x01, 0x02, 0x03)
@@ -226,7 +216,7 @@ class PacketIOFullTest {
     }
 
     @Test
-    fun `AEAD GCM multiple packets roundtrip`() {
+    fun `AEAD GCM multiple packets roundtrip`() = runBlocking {
         val key = ByteArray(32) { (it + 7).toByte() }
         val baseIv = ByteArray(12) { (it + 0x60).toByte() }
         val aesKey = SecretKeySpec(key, "AES")
@@ -243,13 +233,11 @@ class PacketIOFullTest {
             aesKey = aesKey, baseIv = baseIv
         )
 
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 256 * 1024)
-
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
+        val pipe = PipeSource()
+        val writer = AsyncPacketIO(pipe)
         writer.sendCipher = sendCrypto
 
-        val reader = PacketIO(pipeIn, ByteArrayOutputStream())
+        val reader = AsyncPacketIO(pipe)
         reader.recvCipher = recvCrypto
 
         val p1 = byteArrayOf(20, 1)
@@ -364,11 +352,12 @@ class PacketIOFullTest {
 
     @Test
     fun `computePaddingLength always returns at least 4`() {
-        val method = PacketIO::class.java.getDeclaredMethod(
+        val method = AsyncPacketIO::class.java.getDeclaredMethod(
             "computePaddingLength", Int::class.java, Int::class.java, Boolean::class.java
         )
         method.isAccessible = true
-        val packetIO = PacketIO(ByteArrayInputStream(ByteArray(0)), ByteArrayOutputStream())
+        val source = ByteArraySource(ByteArray(0))
+        val packetIO = AsyncPacketIO(source)
 
         for (payloadSize in 0..100) {
             for (blockSize in listOf(8, 16)) {
@@ -391,11 +380,12 @@ class PacketIOFullTest {
 
     @Test
     fun `computePaddingLength with blockSize 16 for AEAD`() {
-        val method = PacketIO::class.java.getDeclaredMethod(
+        val method = AsyncPacketIO::class.java.getDeclaredMethod(
             "computePaddingLength", Int::class.java, Int::class.java, Boolean::class.java
         )
         method.isAccessible = true
-        val packetIO = PacketIO(ByteArrayInputStream(ByteArray(0)), ByteArrayOutputStream())
+        val source = ByteArraySource(ByteArray(0))
+        val packetIO = AsyncPacketIO(source)
 
         // payloadSize = 1, blockSize = 16: unpadded = 6, padding = 16 - 6 = 10 (>= 4, ok)
         val padding = method.invoke(packetIO, 1, 16, false) as Int
@@ -405,11 +395,12 @@ class PacketIOFullTest {
 
     @Test
     fun `computePaddingLength where initial padding is less than 4`() {
-        val method = PacketIO::class.java.getDeclaredMethod(
+        val method = AsyncPacketIO::class.java.getDeclaredMethod(
             "computePaddingLength", Int::class.java, Int::class.java, Boolean::class.java
         )
         method.isAccessible = true
-        val packetIO = PacketIO(ByteArrayInputStream(ByteArray(0)), ByteArrayOutputStream())
+        val source = ByteArraySource(ByteArray(0))
+        val packetIO = AsyncPacketIO(source)
 
         // payloadSize = 2, blockSize = 8: unpadded = 7, padding = 8 - 7 = 1 -> 1 < 4 -> 1 + 8 = 9
         val padding = method.invoke(packetIO, 2, 8, false) as Int
@@ -423,18 +414,22 @@ class PacketIOFullTest {
 
     @Test(expected = SshProtocolException::class)
     fun `readExact throws on premature EOF`() {
-        // Only provide 2 bytes but try to read a packet that expects more
-        val shortData = byteArrayOf(0, 0, 0, 10, 5) // packet_length=10, but only 1 byte after header
-        val input = ByteArrayInputStream(shortData)
-        val packetIO = PacketIO(input, ByteArrayOutputStream())
-        packetIO.readPacket()
+        runBlocking {
+            // Only provide 2 bytes but try to read a packet that expects more
+            val shortData = byteArrayOf(0, 0, 0, 10, 5) // packet_length=10, but only 1 byte after header
+            val source = ByteArraySource(shortData)
+            val packetIO = AsyncPacketIO(source)
+            packetIO.readPacket()
+        }
     }
 
     @Test(expected = SshProtocolException::class)
     fun `readExact throws on empty stream`() {
-        val input = ByteArrayInputStream(ByteArray(0))
-        val packetIO = PacketIO(input, ByteArrayOutputStream())
-        packetIO.readPacket()
+        runBlocking {
+            val source = ByteArraySource(ByteArray(0))
+            val packetIO = AsyncPacketIO(source)
+            packetIO.readPacket()
+        }
     }
 
     // =========================================================================
@@ -443,38 +438,46 @@ class PacketIOFullTest {
 
     @Test(expected = SshProtocolException::class)
     fun `readPlaintextPacket throws on packet length 0`() {
-        // packet_length = 0 (< 2)
-        val data = byteArrayOf(0, 0, 0, 0)
-        val input = ByteArrayInputStream(data)
-        val packetIO = PacketIO(input, ByteArrayOutputStream())
-        packetIO.readPacket()
+        runBlocking {
+            // packet_length = 0 (< 2)
+            val data = byteArrayOf(0, 0, 0, 0)
+            val source = ByteArraySource(data)
+            val packetIO = AsyncPacketIO(source)
+            packetIO.readPacket()
+        }
     }
 
     @Test(expected = SshProtocolException::class)
     fun `readPlaintextPacket throws on packet length 1`() {
-        // packet_length = 1 (< 2)
-        val data = byteArrayOf(0, 0, 0, 1, 0)
-        val input = ByteArrayInputStream(data)
-        val packetIO = PacketIO(input, ByteArrayOutputStream())
-        packetIO.readPacket()
+        runBlocking {
+            // packet_length = 1 (< 2)
+            val data = byteArrayOf(0, 0, 0, 1, 0)
+            val source = ByteArraySource(data)
+            val packetIO = AsyncPacketIO(source)
+            packetIO.readPacket()
+        }
     }
 
     @Test(expected = SshProtocolException::class)
     fun `readPlaintextPacket throws on excessive packet length`() {
-        // packet_length = 300000 (> MAX_PACKET_LENGTH=256*1024)
-        val data = byteArrayOf(0, 0x04, (0x93).toByte(), (0xE0).toByte())
-        val input = ByteArrayInputStream(data)
-        val packetIO = PacketIO(input, ByteArrayOutputStream())
-        packetIO.readPacket()
+        runBlocking {
+            // packet_length = 300000 (> MAX_PACKET_LENGTH=256*1024)
+            val data = byteArrayOf(0, 0x04, (0x93).toByte(), (0xE0).toByte())
+            val source = ByteArraySource(data)
+            val packetIO = AsyncPacketIO(source)
+            packetIO.readPacket()
+        }
     }
 
     @Test(expected = SshProtocolException::class)
     fun `readPlaintextPacket throws on invalid padding length`() {
-        // packet_length = 2, padding_length = 5 -> payloadLength = 2 - 5 - 1 = -4
-        val data = byteArrayOf(0, 0, 0, 2, 5, 0)
-        val input = ByteArrayInputStream(data)
-        val packetIO = PacketIO(input, ByteArrayOutputStream())
-        packetIO.readPacket()
+        runBlocking {
+            // packet_length = 2, padding_length = 5 -> payloadLength = 2 - 5 - 1 = -4
+            val data = byteArrayOf(0, 0, 0, 2, 5, 0)
+            val source = ByteArraySource(data)
+            val packetIO = AsyncPacketIO(source)
+            packetIO.readPacket()
+        }
     }
 
     // =========================================================================
@@ -482,14 +485,14 @@ class PacketIOFullTest {
     // =========================================================================
 
     @Test
-    fun `close closes both streams`() {
-        val input = ByteArrayInputStream(ByteArray(0))
-        val output = ByteArrayOutputStream()
-        val packetIO = PacketIO(input, output)
-
+    fun `close closes source`() {
+        val source = object : ByteArraySource(ByteArray(0)) {
+            var closed = false
+            override fun close() { closed = true }
+        }
+        val packetIO = AsyncPacketIO(source)
         packetIO.close()
-        // After close, reading should throw
-        assertEquals(-1, input.read())
+        assertTrue(source.closed)
     }
 
     // =========================================================================
@@ -498,7 +501,7 @@ class PacketIOFullTest {
 
     @Test
     fun `MAX_PACKET_LENGTH is 256KB`() {
-        assertEquals(256 * 1024, PacketIO.MAX_PACKET_LENGTH)
+        assertEquals(256 * 1024, AsyncPacketIO.MAX_PACKET_LENGTH)
     }
 
     // =========================================================================
@@ -523,13 +526,12 @@ class PacketIOFullTest {
     // Helpers
     // =========================================================================
 
-    private data class Pipe(val writer: PacketIO, val reader: PacketIO)
+    private data class Pipe(val writer: AsyncPacketIO, val reader: AsyncPacketIO)
 
     private fun createPipe(): Pipe {
-        val pipeOut = PipedOutputStream()
-        val pipeIn = PipedInputStream(pipeOut, 256 * 1024)
-        val writer = PacketIO(ByteArrayInputStream(ByteArray(0)), pipeOut)
-        val reader = PacketIO(pipeIn, ByteArrayOutputStream())
+        val shared = PipeSource()
+        val writer = AsyncPacketIO(shared)
+        val reader = AsyncPacketIO(shared)
         return Pipe(writer, reader)
     }
 
