@@ -44,7 +44,7 @@ data class KexInit(
     companion object {
         /** Build our client KEXINIT with preferred algorithms. */
         fun createClient(): KexInit {
-            val cookie = ByteArray(16).also { SecureRandom().nextBytes(it) }
+            val cookie = ByteArray(16).also { de.arcan.arcshell.ssh.SshRandom.instance.nextBytes(it) }
             return KexInit(
                 cookie = cookie,
                 kexAlgorithms = KeyExchangeRegistry.nameList() + "kex-strict-c-v00@openssh.com",

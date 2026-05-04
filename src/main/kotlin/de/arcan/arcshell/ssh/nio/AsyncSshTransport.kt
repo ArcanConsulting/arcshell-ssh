@@ -1,39 +1,43 @@
-package de.arcan.arcshell.ssh.transport
+package de.arcan.arcshell.ssh.nio
 
 import de.arcan.arcshell.ssh.SSH_VERSION_STRING
 import de.arcan.arcshell.ssh.SshMsgType
-import java.io.InputStream
-import java.io.OutputStream
+import de.arcan.arcshell.ssh.transport.CipherRegistry
+import de.arcan.arcshell.ssh.transport.CryptoState
+import de.arcan.arcshell.ssh.transport.KexInit
+import de.arcan.arcshell.ssh.transport.KeyDerivation
+import de.arcan.arcshell.ssh.transport.KeyExchangeAlgorithm
+import de.arcan.arcshell.ssh.transport.KeyExchangeRegistry
+import de.arcan.arcshell.ssh.transport.MacRegistry
+import de.arcan.arcshell.ssh.transport.NegotiatedAlgorithms
+import de.arcan.arcshell.ssh.transport.SshBufferReader
+import de.arcan.arcshell.ssh.transport.SshBufferWriter
+import de.arcan.arcshell.ssh.transport.SshProtocolException
+import de.arcan.arcshell.ssh.transport.negotiateAlgorithms
 import java.math.BigInteger
+import java.nio.ByteBuffer
 
 /**
- * Callback for host key verification. The implementation should check whether
- * the server's host key is trusted (known_hosts, user prompt, etc.).
+ * Suspend-based SSH transport layer (RFC 4253). Async port of [SshTransport]
+ * that uses NIO channels via [AsyncPacketIO] and [AsyncDataSource] instead
+ * of blocking streams.
  *
- * @param hostKeyType e.g. "ssh-ed25519"
- * @param hostKeyBlob raw host key bytes
- * @return true if the key is accepted
- */
-typealias HostKeyVerifier = (hostKeyType: String, hostKeyBlob: ByteArray) -> Boolean
-
-/**
- * SSH transport layer (RFC 4253). Handles:
+ * Handles:
  * - Version exchange
  * - KEXINIT algorithm negotiation
  * - Key exchange (DH/ECDH)
  * - NEWKEYS activation (encryption begins)
  *
- * After [performHandshake], the underlying [PacketIO] is encrypted and
+ * After [performHandshake], the underlying [AsyncPacketIO] is encrypted and
  * authenticated. Higher layers (auth, connection) use [sendPacket] and
  * [receivePacket] which go through the encrypted channel.
  */
-class SshTransport(
-    input: InputStream,
-    output: OutputStream,
-    private val hostKeyVerifier: HostKeyVerifier
+class AsyncSshTransport(
+    private val source: AsyncDataSource,
+    private val packetIO: AsyncPacketIO,
+    private val hostKeyVerifier: suspend (String, ByteArray) -> Boolean,
+    private val legacyAlgorithmApprover: (suspend (List<String>) -> Boolean)? = null
 ) {
-    val packetIO = PacketIO(input, output)
-
     /** The server's version string (set during handshake). */
     var serverVersion: String = ""
         private set
@@ -46,7 +50,7 @@ class SshTransport(
     var negotiated: NegotiatedAlgorithms? = null
         private set
 
-    /** The negotiated KEX algorithm name (for display, e.g. "KEX used: curve25519-sha256"). */
+    /** The negotiated KEX algorithm name (for display). */
     val kexAlgorithmName: String get() = negotiated?.kex ?: "none"
     val negotiatedAlgorithms: NegotiatedAlgorithms? get() = negotiated
 
@@ -61,9 +65,9 @@ class SshTransport(
      *
      * @throws SshProtocolException on protocol errors
      */
-    fun performHandshake(rawInput: InputStream, rawOutput: OutputStream) {
-        // Step 1: Version exchange (RFC 4253 §4.2)
-        exchangeVersions(rawInput, rawOutput)
+    suspend fun performHandshake() {
+        // Step 1: Version exchange (RFC 4253 section 4.2)
+        exchangeVersions()
 
         // Step 2: KEXINIT exchange
         val clientKexInit = KexInit.createClient()
@@ -81,6 +85,15 @@ class SshTransport(
         // Step 3: Negotiate algorithms
         negotiated = negotiateAlgorithms(clientKexInit, serverKexInit)
         val alg = negotiated!!
+
+        // Step 3b: Check for legacy algorithms and prompt user
+        val legacyUsed = collectLegacyAlgorithms(alg)
+        if (legacyUsed.isNotEmpty()) {
+            val approved = legacyAlgorithmApprover?.invoke(legacyUsed) ?: true
+            if (!approved) {
+                throw SshProtocolException("Connection rejected: server requires legacy algorithms")
+            }
+        }
 
         // Step 4: Run key exchange
         val kexAlgo = KeyExchangeRegistry.byName(alg.kex)
@@ -121,12 +134,12 @@ class SshTransport(
     }
 
     /** Send a packet through the (possibly encrypted) transport. */
-    fun sendPacket(payload: ByteArray) {
+    suspend fun sendPacket(payload: ByteArray) {
         packetIO.writePacket(payload)
     }
 
     /** Receive a packet from the (possibly encrypted) transport. Returns payload. */
-    fun receivePacket(): ByteArray {
+    suspend fun receivePacket(): ByteArray {
         while (true) {
             val payload = packetIO.readPacket()
             if (payload.isEmpty()) throw SshProtocolException("Empty packet received")
@@ -145,8 +158,19 @@ class SshTransport(
         }
     }
 
+    /**
+     * Send a packet from a non-suspend context (e.g. channel callbacks like onRequest).
+     * Enqueues the write via runBlocking on a confined scope. Use sparingly — prefer
+     * the suspend [sendPacket] whenever possible.
+     */
+    fun sendPacketBlocking(payload: ByteArray) {
+        kotlinx.coroutines.runBlocking {
+            packetIO.writePacket(payload)
+        }
+    }
+
     /** Send SSH_MSG_DISCONNECT and close. */
-    fun disconnect(reason: Int = 11, description: String = "Bye") {
+    suspend fun disconnect(reason: Int = 11, description: String = "Bye") {
         val payload = SshBufferWriter()
             .writeByte(SshMsgType.DISCONNECT)
             .writeUint32(reason)
@@ -161,31 +185,38 @@ class SshTransport(
         packetIO.close()
     }
 
+    private fun collectLegacyAlgorithms(alg: NegotiatedAlgorithms): List<String> {
+        val legacy = mutableListOf<String>()
+        if (alg.kex in KeyExchangeRegistry.LEGACY_ALGORITHMS) legacy.add(alg.kex)
+        if (alg.macC2S in MacRegistry.LEGACY_ALGORITHMS) legacy.add(alg.macC2S)
+        if (alg.macS2C in MacRegistry.LEGACY_ALGORITHMS && alg.macS2C != alg.macC2S) legacy.add(alg.macS2C)
+        return legacy
+    }
+
     // --- Version exchange ---
 
-    private fun exchangeVersions(rawInput: InputStream, rawOutput: OutputStream) {
+    private suspend fun exchangeVersions() {
         // Send our version
         val versionLine = "$SSH_VERSION_STRING\r\n"
-        rawOutput.write(versionLine.toByteArray(Charsets.US_ASCII))
-        rawOutput.flush()
+        source.write(ByteBuffer.wrap(versionLine.toByteArray(Charsets.US_ASCII)))
 
         // Read server version (may be preceded by banner lines)
-        serverVersion = readVersionLine(rawInput)
+        serverVersion = readVersionLine()
         if (!serverVersion.startsWith("SSH-2.0-") && !serverVersion.startsWith("SSH-1.99-")) {
             throw SshProtocolException("Unsupported server version: $serverVersion")
         }
     }
 
-    private fun readVersionLine(input: InputStream): String {
+    private suspend fun readVersionLine(): String {
         val sb = StringBuilder()
         var foundVersion = false
         while (!foundVersion) {
-            val line = readLine(input)
+            val line = readLine()
             if (line.startsWith("SSH-")) {
                 foundVersion = true
                 return line
             }
-            // Non-SSH lines are banner (RFC 4253 §4.2), ignore them
+            // Non-SSH lines are banner (RFC 4253 section 4.2), ignore them
             if (sb.length > 32 * 1024) {
                 throw SshProtocolException("Server banner too long")
             }
@@ -193,17 +224,23 @@ class SshTransport(
         throw SshProtocolException("No SSH version line received")
     }
 
-    private fun readLine(input: InputStream): String {
+    private suspend fun readLine(): String {
         val sb = StringBuilder()
         while (true) {
-            val b = input.read()
-            if (b < 0) throw SshProtocolException("Connection closed during version exchange")
+            val byte = packetIO.readExact(1)
+            val b = byte[0].toInt() and 0xFF
             if (b == '\n'.code) {
                 val line = sb.toString().trimEnd('\r')
                 return line
             }
             sb.append(b.toChar())
-            if (sb.length > 1024) throw SshProtocolException("Version line too long")
+            if (sb.length > 1024) {
+                val hex = sb.substring(0, 64.coerceAtMost(sb.length))
+                    .map { "%02x".format(it.code) }.joinToString(" ")
+                throw SshProtocolException(
+                    "Version line too long (${sb.length} bytes, no newline). First 64 bytes: $hex"
+                )
+            }
         }
     }
 
@@ -215,7 +252,7 @@ class SshTransport(
         val hostKeyBlob: ByteArray
     )
 
-    private fun performKeyExchange(kexAlgo: KeyExchangeAlgorithm): KexResult {
+    private suspend fun performKeyExchange(kexAlgo: KeyExchangeAlgorithm): KexResult {
         // Generate ephemeral key pair
         val clientPubKey = kexAlgo.generateClientKey()
 

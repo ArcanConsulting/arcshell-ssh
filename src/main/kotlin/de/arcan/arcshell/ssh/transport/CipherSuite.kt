@@ -60,9 +60,13 @@ object MacRegistry {
     val HMAC_SHA2_512_ETM = MacAlgorithm("hmac-sha2-512-etm@openssh.com", "HmacSHA512", 64, 64, true)
     val HMAC_SHA2_256 = MacAlgorithm("hmac-sha2-256", "HmacSHA256", 32, 32, false)
     val HMAC_SHA2_512 = MacAlgorithm("hmac-sha2-512", "HmacSHA512", 64, 64, false)
+    val HMAC_SHA1 = MacAlgorithm("hmac-sha1", "HmacSHA1", 20, 20, false)
+
+    val LEGACY_ALGORITHMS = setOf("hmac-sha1")
 
     fun getPreferred(): List<MacAlgorithm> = listOf(
-        HMAC_SHA2_256_ETM, HMAC_SHA2_512_ETM, HMAC_SHA2_256, HMAC_SHA2_512
+        HMAC_SHA2_256_ETM, HMAC_SHA2_512_ETM, HMAC_SHA2_256, HMAC_SHA2_512,
+        HMAC_SHA1 // Legacy fallback (last resort)
     )
 
     fun byName(name: String): MacAlgorithm? = getPreferred().firstOrNull { it.name == name }

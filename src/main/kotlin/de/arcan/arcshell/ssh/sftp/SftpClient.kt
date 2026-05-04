@@ -1,8 +1,9 @@
 package de.arcan.arcshell.ssh.sftp
 
-import de.arcan.arcshell.ssh.connection.SessionChannel
+import de.arcan.arcshell.ssh.nio.AsyncSessionChannel
 import de.arcan.arcshell.ssh.transport.SshBufferReader
 import de.arcan.arcshell.ssh.transport.SshBufferWriter
+import kotlinx.coroutines.runBlocking
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -11,15 +12,17 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * SFTP v3 client (draft-ietf-secsh-filexfer-02).
  *
- * Wraps a [SessionChannel] after `requestSubsystem("sftp")`. All operations
- * are synchronous — call from a background thread (e.g. Dispatchers.IO).
+ * Wraps an [AsyncSessionChannel] after `requestSubsystem("sftp")`. All
+ * public operations are blocking — call from a background thread
+ * (e.g. Dispatchers.IO). Internally bridges to the async channel via
+ * [runBlocking].
  *
  * SFTP framing: each message is `uint32 length | byte type | payload`.
  * The channel's raw I/O carries the SFTP byte stream; chunks from
- * [SessionChannel.read] may not align with packet boundaries, so we
+ * [AsyncSessionChannel.read] may not align with packet boundaries, so we
  * buffer internally.
  */
-class SftpClient(private val channel: SessionChannel) {
+class SftpClient(private val channel: AsyncSessionChannel) {
 
     private val nextRequestId = AtomicInteger(1)
     private var pendingData = ByteArray(0)
@@ -298,8 +301,8 @@ class SftpClient(private val channel: SessionChannel) {
 
     /** Close the SFTP session and the underlying channel. */
     fun close() {
-        try { channel.sendEof() } catch (_: Exception) {}
-        try { channel.close() } catch (_: Exception) {}
+        try { runBlocking { channel.sendEof() } } catch (_: Exception) {}
+        try { runBlocking { channel.close() } } catch (_: Exception) {}
     }
 
     // ---- Wire format helpers ----
@@ -322,7 +325,7 @@ class SftpClient(private val channel: SessionChannel) {
             .writeByte(type)
             .writeBytes(payload)
             .toByteArray()
-        channel.write(packet)
+        runBlocking { channel.write(packet) }
     }
 
     private fun receivePacket(): Pair<Int, SshBufferReader> {
@@ -339,7 +342,7 @@ class SftpClient(private val channel: SessionChannel) {
     /** Accumulate channel chunks until [count] bytes are available. */
     private fun readExact(count: Int): ByteArray {
         while (pendingData.size < count) {
-            val chunk = channel.read()
+            val chunk = runBlocking { channel.read() }
             if (chunk.isEmpty()) throw IOException("SFTP channel closed")
             pendingData = pendingData + chunk
         }

@@ -87,7 +87,7 @@ open class Curve25519Sha256 : KeyExchangeAlgorithm {
 
     override fun generateClientKey(): ByteArray {
         val kpg = X25519KeyPairGenerator()
-        kpg.init(X25519KeyGenerationParameters(SecureRandom()))
+        kpg.init(X25519KeyGenerationParameters(de.arcan.arcshell.ssh.SshRandom.instance))
         val kp = kpg.generateKeyPair()
         privateKey = kp.private as X25519PrivateKeyParameters
         return (kp.public as X25519PublicKeyParameters).encoded
@@ -199,8 +199,8 @@ open class DhGroupKex(
     private var publicKeyValue: BigInteger? = null
 
     override fun generateClientKey(): ByteArray {
-        val random = SecureRandom()
-        val x = BigInteger(bitSize, random).mod(prime.subtract(BigInteger.TWO))
+        val random = de.arcan.arcshell.ssh.SshRandom.instance
+        val x = BigInteger(bitSize, random).mod(prime.subtract(BigInteger.valueOf(2)))
             .add(BigInteger.ONE)
         privateKey = x
         publicKeyValue = generator.modPow(x, prime)
@@ -237,12 +237,21 @@ open class DhGroupKex(
     }
 }
 
+/** Diffie-Hellman Group14 SHA-1 (RFC 4253 §8, 2048-bit, legacy). */
+class DhGroup14Sha1 : DhGroupKex(
+    name = "diffie-hellman-group14-sha1",
+    hashAlgorithm = "SHA-1",
+    prime = DhGroup14Sha256.DH_GROUP14_P,
+    generator = BigInteger.valueOf(2),
+    bitSize = 2048
+)
+
 /** Diffie-Hellman Group14 SHA-256 (RFC 4253 §8 + RFC 8268, 2048-bit). */
 class DhGroup14Sha256 : DhGroupKex(
     name = "diffie-hellman-group14-sha256",
     hashAlgorithm = "SHA-256",
     prime = DH_GROUP14_P,
-    generator = BigInteger.TWO,
+    generator = BigInteger.valueOf(2),
     bitSize = 2048
 ) {
     companion object {
@@ -268,7 +277,7 @@ class DhGroup16Sha512 : DhGroupKex(
     name = "diffie-hellman-group16-sha512",
     hashAlgorithm = "SHA-512",
     prime = DH_GROUP16_P,
-    generator = BigInteger.TWO,
+    generator = BigInteger.valueOf(2),
     bitSize = 4096
 ) {
     companion object {
@@ -325,7 +334,7 @@ class DhGroup18Sha512 : DhGroupKex(
     name = "diffie-hellman-group18-sha512",
     hashAlgorithm = "SHA-512",
     prime = DH_GROUP18_P,
-    generator = BigInteger.TWO,
+    generator = BigInteger.valueOf(2),
     bitSize = 8192
 ) {
     companion object {
@@ -379,6 +388,8 @@ class DhGroup18Sha512 : DhGroupKex(
 
 /** Registry of supported key exchange algorithms, ordered by preference. */
 object KeyExchangeRegistry {
+    val LEGACY_ALGORITHMS = setOf("diffie-hellman-group14-sha1")
+
     fun getPreferred(): List<KeyExchangeAlgorithm> = listOf(
         MlKem768X25519Sha512(),     // Post-Quantum hybrid (highest priority)
         Curve25519Sha256(),
@@ -388,7 +399,8 @@ object KeyExchangeRegistry {
         EcdhSha2("nistp521", "SHA-512"),
         DhGroup16Sha512(),
         DhGroup18Sha512(),
-        DhGroup14Sha256()
+        DhGroup14Sha256(),
+        DhGroup14Sha1()             // Legacy fallback (last resort)
     )
 
     fun byName(name: String): KeyExchangeAlgorithm? =

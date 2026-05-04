@@ -1,34 +1,24 @@
-package de.arcan.arcshell.ssh.auth
+package de.arcan.arcshell.ssh.nio
 
 import de.arcan.arcshell.ssh.SshMsgType
 import de.arcan.arcshell.ssh.SshService
+import de.arcan.arcshell.ssh.auth.AuthResult
+import de.arcan.arcshell.ssh.auth.Prompt
 import de.arcan.arcshell.ssh.transport.SshBufferReader
 import de.arcan.arcshell.ssh.transport.SshBufferWriter
 import de.arcan.arcshell.ssh.transport.SshProtocolException
-import de.arcan.arcshell.ssh.transport.SshTransport
 
 /**
- * Result of an authentication attempt.
- */
-sealed class AuthResult {
-    data object Success : AuthResult()
-    data class Failure(val methodsCanContinue: List<String>, val partialSuccess: Boolean) : AuthResult()
-    data class InfoRequest(val name: String, val instruction: String, val prompts: List<Prompt>) : AuthResult()
-    data class Banner(val message: String) : AuthResult()
-}
-
-data class Prompt(val text: String, val echo: Boolean)
-
-/**
- * SSH user authentication dispatcher (RFC 4252).
+ * Async SSH user authentication dispatcher (RFC 4252).
  *
- * Requests the "ssh-userauth" service, then tries authentication methods
- * in order until one succeeds or all fail.
+ * Non-blocking port of [de.arcan.arcshell.ssh.auth.SshAuthenticator].
+ * Uses [AsyncSshTransport] for packet I/O, with all methods being
+ * suspend functions suitable for coroutine-based callers.
  */
-class SshAuthenticator(private val transport: SshTransport) {
+class AsyncSshAuthenticator(private val transport: AsyncSshTransport) {
 
-    /** Request the ssh-userauth service. Must be called before authenticate. */
-    fun requestAuthService() {
+    /** Request the ssh-userauth service. Must be called before any auth method. */
+    suspend fun requestAuthService() {
         val payload = SshBufferWriter()
             .writeByte(SshMsgType.SERVICE_REQUEST)
             .writeUtf8(SshService.USERAUTH)
@@ -40,15 +30,17 @@ class SshAuthenticator(private val transport: SshTransport) {
             val response = transport.receivePacket()
             when (response[0].toInt()) {
                 SshMsgType.SERVICE_ACCEPT -> return
-                7 -> {} // EXT_INFO (RFC 8308) — skip
-                SshMsgType.GLOBAL_REQUEST -> {} // e.g. hostkeys-00@openssh.com — skip
-                else -> throw SshProtocolException("Service request for ${SshService.USERAUTH} rejected: got ${response[0]}")
+                7 -> {} // EXT_INFO (RFC 8308) -- skip
+                SshMsgType.GLOBAL_REQUEST -> {} // e.g. hostkeys-00@openssh.com -- skip
+                else -> throw SshProtocolException(
+                    "Service request for ${SshService.USERAUTH} rejected: got ${response[0]}"
+                )
             }
         }
     }
 
     /** Try password authentication. */
-    fun authPassword(username: String, password: String): AuthResult {
+    suspend fun authPassword(username: String, password: String): AuthResult {
         val payload = SshBufferWriter()
             .writeByte(SshMsgType.USERAUTH_REQUEST)
             .writeUtf8(username)
@@ -68,7 +60,7 @@ class SshAuthenticator(private val transport: SshTransport) {
      * @param publicKeyBlob the public key in SSH wire format
      * @param signer callback that signs the auth data with the private key
      */
-    fun authPublicKey(
+    suspend fun authPublicKey(
         username: String,
         keyType: String,
         publicKeyBlob: ByteArray,
@@ -94,7 +86,7 @@ class SshAuthenticator(private val transport: SshTransport) {
         if (queryResult is AuthResult.Failure) return queryResult
         // PK_OK means we can send the real request with signature
 
-        // Step 2: Build the data to sign (RFC 4252 §7)
+        // Step 2: Build the data to sign (RFC 4252 S7)
         val signData = SshBufferWriter()
             .writeString(transport.sessionId)
             .writeByte(SshMsgType.USERAUTH_REQUEST)
@@ -126,11 +118,11 @@ class SshAuthenticator(private val transport: SshTransport) {
     /**
      * Try keyboard-interactive authentication.
      * @param username SSH username
-     * @param responder callback that receives prompts and returns answers
+     * @param responder suspend callback that receives prompts and returns answers
      */
-    fun authKeyboardInteractive(
+    suspend fun authKeyboardInteractive(
         username: String,
-        responder: (name: String, instruction: String, prompts: List<Prompt>) -> List<String>
+        responder: suspend (name: String, instruction: String, prompts: List<Prompt>) -> List<String>
     ): AuthResult {
         val payload = SshBufferWriter()
             .writeByte(SshMsgType.USERAUTH_REQUEST)
@@ -157,7 +149,7 @@ class SshAuthenticator(private val transport: SshTransport) {
     }
 
     /** Try "none" authentication to learn available methods. */
-    fun authNone(username: String): AuthResult {
+    suspend fun authNone(username: String): AuthResult {
         val payload = SshBufferWriter()
             .writeByte(SshMsgType.USERAUTH_REQUEST)
             .writeUtf8(username)
@@ -172,7 +164,7 @@ class SshAuthenticator(private val transport: SshTransport) {
      * Read auth response, skipping banners.
      * @param expectPkOk if true, message 60 is PK_OK (pubkey query); otherwise INFO_REQUEST (kbd-interactive)
      */
-    private fun readAuthResponse(expectPkOk: Boolean = false): AuthResult {
+    private suspend fun readAuthResponse(expectPkOk: Boolean = false): AuthResult {
         while (true) {
             val response = transport.receivePacket()
             val msgType = response[0].toInt()
@@ -188,7 +180,7 @@ class SshAuthenticator(private val transport: SshTransport) {
                 }
 
                 SshMsgType.USERAUTH_BANNER -> {
-                    reader.readUtf8() // banner text — skip, keep reading
+                    reader.readUtf8() // banner text -- skip, keep reading
                 }
 
                 // Message 60: PK_OK (pubkey) or INFO_REQUEST (keyboard-interactive)
@@ -218,7 +210,7 @@ class SshAuthenticator(private val transport: SshTransport) {
         }
     }
 
-    private fun sendInfoResponse(answers: List<String>) {
+    private suspend fun sendInfoResponse(answers: List<String>) {
         val buf = SshBufferWriter()
             .writeByte(SshMsgType.USERAUTH_INFO_RESPONSE)
             .writeUint32(answers.size)
