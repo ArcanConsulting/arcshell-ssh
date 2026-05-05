@@ -1,6 +1,6 @@
 # arcshell-ssh
 
-Pure Kotlin SSH-2 library built on BouncyCastle. No Android dependencies — runs on any JVM.
+Kotlin + Java SSH-2 library with built-in cryptographic primitives. No external dependencies beyond kotlinx-coroutines — runs on any JVM 17+.
 
 Used in production by [ArcShell](https://arcshell.app) — an SSH client for Android.
 
@@ -15,6 +15,7 @@ AsyncSshClient
   └── AsyncSshTransport (NIO socket, KEX, packet encryption)
         └── AsyncSshConnection (channel multiplexing)
               ├── AsyncSessionChannel (shell, exec, subsystem)
+              ├── AsyncAgentChannel (SSH agent forwarding)
               ├── SftpClient (SFTP subsystem)
               └── Direct-TCP channels (port forwarding)
 ```
@@ -22,11 +23,12 @@ AsyncSshClient
 ## Features
 
 ### Key Exchange
-- **mlkem768x25519-sha512** — Post-quantum hybrid (ML-KEM-768 + X25519)
+- **sntrup761x25519-sha512** — Post-quantum hybrid (sntrup761 + X25519, OpenSSH default PQ)
+- **mlkem768x25519-sha512** — Post-quantum hybrid (ML-KEM-768 + X25519, NIST standardized)
 - curve25519-sha256 (RFC 8731)
 - ecdh-sha2-nistp256/384/521 (RFC 5656)
-- diffie-hellman-group16-sha512 (RFC 3526, 4096-bit)
-- diffie-hellman-group14-sha256 (RFC 8268)
+- diffie-hellman-group16-sha512 / group18-sha512 (RFC 3526)
+- diffie-hellman-group14-sha256 / group14-sha1 (RFC 8268)
 
 ### Ciphers
 - **chacha20-poly1305@openssh.com** — Preferred (no AES-NI needed)
@@ -38,22 +40,34 @@ AsyncSshClient
 - hmac-sha2-256 / hmac-sha2-512
 
 ### Host Key Algorithms
-- ssh-ed25519
-- ecdsa-sha2-nistp256/384/521
-- rsa-sha2-512 / rsa-sha2-256
+- ssh-ed25519 (+ certificate variant)
+- ecdsa-sha2-nistp256/384/521 (+ certificate variants)
+- rsa-sha2-512 / rsa-sha2-256 (+ certificate variants)
 - ssh-rsa (SHA-1, verify-only for legacy servers)
+
+### SSH Certificates
+- OpenSSH certificate parsing (ssh-ed25519-cert-v01, rsa-sha2-*-cert-v01, ecdsa-*-cert-v01)
+- Host certificate verification (CA-based trust)
+- User certificate authentication
 
 ### Authentication
 - Public key (Ed25519, RSA, ECDSA)
+- Certificate-based (OpenSSH certificates)
 - Password
 - Keyboard-interactive (multi-round challenge-response)
+
+### SSH Agent Forwarding
+- `auth-agent-req@openssh.com` request on session channels
+- Server-initiated `auth-agent@openssh.com` channel handling
+- Pluggable `AgentMessageHandler` interface
 
 ### Protocol
 - SSH-2 transport (RFC 4253), authentication (RFC 4252), connection (RFC 4254)
 - **Strict KEX** — Terrapin attack mitigation (CVE-2023-48795)
-- Channel multiplexing (shell, exec, subsystem, direct-tcpip)
+- Channel multiplexing (shell, exec, subsystem, direct-tcpip, agent)
 - SFTP subsystem (v3 protocol)
 - Port forwarding (local, remote, dynamic)
+- Jumphost tunneling (nested SSH through existing channels)
 - Keep-alive (`keepalive@openssh.com` / `SSH_MSG_IGNORE`)
 - Shared `SecureRandom` instance (eliminates crypto cold-start delay)
 
@@ -142,16 +156,20 @@ Docker SSH containers (modern KEX, DH-Group14, NIO baseline).
 
 ## Dependencies
 
-- **BouncyCastle 1.80** (`bcprov-jdk18on`, `bcpkix-jdk18on`)
-- Kotlin Coroutines
+- **Kotlin Coroutines** (`kotlinx-coroutines-core:1.7.3`)
 - Kotlin stdlib
+- JDK 17+
+
+No external cryptographic libraries. All crypto primitives (Ed25519, X25519, ChaCha20-Poly1305,
+AES, ML-KEM-768, sntrup761) are included in the `crypto/bc/` package — derived from BouncyCastle
+v1.80 (MIT license) and repackaged under `de.arcan.arcshell.crypto.bc`. The SSH protocol code is
+Kotlin, the crypto primitives are Java.
 
 ## Known Limitations
 
-- No SSH certificate support (openssh-cert-v01@openssh.com) — planned for v1.4
-- No agent forwarding — planned for v1.4
 - No compression (not advertised)
 - No GSSAPI/Kerberos authentication
+- ssh-rsa (SHA-1) accepted for host key verification only
 - ssh-rsa (SHA-1) accepted for host key verification only
 
 ## Security
